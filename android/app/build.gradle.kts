@@ -1,0 +1,67 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "com.tslsb.app"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.tslsb.app"
+        minSdk = 24
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0"
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    buildFeatures {
+        viewBinding = true
+    }
+}
+
+// The Tailscale tsnet AAR is optional. When it is absent (e.g. local dev
+// without gomobile), we compile a stub Tsnetbridge class instead so the
+// project still builds and can run in Direct LAN Mode.
+val tsnetbridgeAar = file("libs/tsnetbridge.aar")
+android.sourceSets.getByName("main") {
+    if (!tsnetbridgeAar.exists()) {
+        java.srcDir("src/stub/java")
+    }
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("com.google.android.material:material:1.11.0")
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+    implementation("androidx.activity:activity-ktx:1.8.2")
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
+
+    // Networking & coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("com.google.code.gson:gson:2.10.1")
+
+    // Tailscale tsnet bridge AAR (built from go/tsnetbridge via gomobile).
+    // Optional: if absent, the stub in src/stub/java is used instead.
+    if (tsnetbridgeAar.exists()) {
+        implementation(files("libs/tsnetbridge.aar"))
+    }
+}

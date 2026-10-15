@@ -1,0 +1,9 @@
+{
+  "string": [
+    { "name": "app_name", "value": "TS LocalSend" },
+    { "name": "module_desc", "value": "TS LocalSend 主模块" },
+    { "name": "entry_ability_desc", "value": "主界面" },
+    { "name": "share_ability_desc", "value": "分享入口" },
+    { "name": "share_ext_desc", "value": "系统分享扩展" }
+  ]
+}

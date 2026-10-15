@@ -1,0 +1,59 @@
+# === Android / Gradle ===
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+*/build/
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# === HarmonyOS ===
+.huawei/
+harmonyos/**/build/
+harmonyos/**/.preview/
+harmonyos/**/node_modules/
+harmonyos/oh_modules/
+*.har
+*.hsp
+*.app
+*.hap
+
+# === Go ===
+go/bin/
+go/pkg/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+go.work.sum
+
+# === Build artifacts & binaries ===
+*.apk
+*.aar
+*.ap_
+*.dex
+*.jar
+!android/app/libs/*.jar
+
+# === IDE / OS ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+
+# === Logs ===
+*.log
+logs/

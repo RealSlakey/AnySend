@@ -1,0 +1,9 @@
+{
+  "name": "tslsb",
+  "version": "1.0.0",
+  "description": "Tailscale + LocalSend cross-platform file transfer",
+  "main": "",
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {}
+}
