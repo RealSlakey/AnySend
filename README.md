@@ -1,166 +1,124 @@
-# TS LocalSend Bridge
+# AnySend
 
-在 Android 和 HarmonyOS NEXT 手机之间跨网络传输文件的应用。内嵌 Tailscale（tsnet 用户态网络栈）实现虚拟内网穿透，基于 LocalSend v2 协议传输文件。两台设备无需处于同一局域网。
-
-## 架构
+手机与 Mac 之间互传文件、镜像屏幕、远程操控的一体化工具。三端（Android / HarmonyOS NEXT / macOS）共用两套线协议：**LocalSend v2** 传文件，**scrcpy v2/v3** 传画面与控制。网络层不要求设备在同一局域网——移动端内嵌 `tsnet` 用户态隧道，macOS 侧装开源 `tailscaled`，两条路都汇到同一个 tailnet。
 
 ```
-┌──────────────────────┐                         ┌──────────────────────┐
-│   Android 手机        │                         │  HarmonyOS NEXT 手机  │
-│                      │                         │                      │
-│  ┌────────────────┐  │   Tailscale 隧道加密     │  ┌────────────────┐  │
-│  │ 分享面板 → App  │  │ ◄─────────────────────► │  │ 分享面板 → App  │  │
-│  └────────┬───────┘  │   (WireGuard / DERP)    │  └────────┬───────┘  │
-│           │          │                         │           │          │
-│  ┌────────▼───────┐  │                         │  ┌────────▼───────┐  │
-│  │ TailscaleManager│ │                         │  │ TailscaleManager│ │
-│  │ (Kotlin, AAR)   │ │                         │  │ (ArkTS, NAPI)   │ │
-│  └────────┬───────┘  │                         │  └────────┬───────┘  │
-│           │          │                         │           │          │
-│  ┌────────▼───────┐  │                         │  ┌────────▼───────┐  │
-│  │ tsnet (Go AAR) │  │                         │  │ tsnet (Go .so)  │  │
-│  │ 用户态 netstack │ │                         │  │ 用户态 netstack  │ │
-│  └────────────────┘  │                         │  └────────────────┘  │
-│                      │                         │                      │
-│  LocalSend Sender/   │                         │  LocalSend Sender/   │
-│  Server (Kotlin)     │                         │  Server (ArkTS)      │
-│  端口 53317          │                         │  端口 53317          │
-└──────────────────────┘                         └──────────────────────┘
+┌──────────────┐        ┌──────────────────┐        ┌──────────────┐
+│ Android 手机  │        │ HarmonyOS NEXT   │        │    macOS     │
+│ Kotlin       │        │ ArkTS + C++      │        │ Flutter 分叉 │
+└──────┬───────┘        └────────┬─────────┘        └──────┬───────┘
+       │                         │                         │
+       │◄──── LocalSend v2 :53317（文件）──────────────────►│
+       │◄──── scrcpy 流 :27042 / :27043（画面与控制）──────►│
+       │                         │                         │
+  ┌────▼─────┐             ┌─────▼──────┐           ┌──────▼───────┐
+  │ tsnet AAR│             │ tsnet .so  │           │ tailscaled   │
+  │ 用户态栈  │             │ 用户态栈    │           │ 真实 utun 网卡│
+  └──────────┘             └────────────┘           └──────────────┘
 ```
 
-### 关键设计
+## 能力矩阵
 
-1. **内嵌 Tailscale，不依赖系统 VPN**：使用 `tsnet` 的用户态 netstack 模式，无需 TUN 权限，Tailscale 节点运行在应用进程内。
-2. **设备发现用 Tailscale Peer API**：Tailscale 不转发组播，因此不使用 LocalSend 的 UDP 组播发现，改为通过 `tsnet` 获取同 tailnet 下的 peer 列表和 Tailscale IP。
-3. **传输走 Tailscale IP**：LocalSend 的 HTTP 流量（端口 53317）通过 tsnet 的 dial/listen 走 Tailscale 隧道，全程 WireGuard 加密。
-4. **Go 桥接库跨平台共享**：同一套 Go 代码（`go/tsnetbridge`）通过 gomobile 编译为 Android AAR，通过 c-shared + NAPI 编译为 HarmonyOS .so。
+| 能力 | Android | HarmonyOS NEXT | macOS |
+|---|---|---|---|
+| 文件互传 | `protocol/LocalSendServer.kt`（724 行） | `protocol/LocalSendServer.ets` | LocalSend 原生能力 |
+| 局域网组播发现 | `protocol/LanDiscovery.kt` | `protocol/` 同名实现 | LocalSend 原生能力 |
+| 屏幕镜像（**被控**安卓） | — | `pages/MirrorPage.ets`、`pages/AppStreamPage.ets` | `Runner/AndroidMirrorController.swift`（1222 行） |
+| 桌面远控（**被控** Mac） | — | — | `Runner/RemoteHostController.swift`（919 行） |
+| 桌面远控（**主控** Mac） | `remote/MacRemoteClient.kt`、`RemoteMacActivity.kt` | `pages/MacRemotePage.ets`（1435 行） | — |
+| 短信收发中转 | `sms/`（读写 + 中继 + Shizuku 写权限） | `sms/SmsStore.ets`、`pages/SmsListPage.ets` 等 | — |
+| 跨网隧道 | 内嵌 tsnet（AAR） | 内嵌 tsnet（c-shared .so） | 内置 tailscaled（root LaunchDaemon） |
 
 ## 目录结构
 
 ```
 .
-├── protocol/                  # LocalSend v2 协议规范（两端实现的唯一参考）
-├── go/                        # Go tsnet 桥接库（跨平台共享）
-│   ├── tsnetbridge/           # 核心封装
-│   └── cmd/cshared/           # c-shared 入口（HarmonyOS 用）
-├── android/                   # Android 应用（Kotlin）
-│   └── app/src/main/java/com/tslsb/app/
-│       ├── bridge/            # TailscaleManager（封装 AAR）
-│       ├── protocol/          # LocalSend 发送/接收
-│       ├── App.kt
-│       ├── MainActivity.kt
-│       ├── ShareActivity.kt   # 系统分享入口
-│       └── BridgeService.kt   # 前台保活服务
-├── harmonyos/                 # HarmonyOS NEXT 应用（ArkTS）
-│   └── entry/src/main/
-│       ├── ets/
-│       │   ├── bridge/        # TailscaleManager（封装 NAPI）
-│       │   ├── protocol/      # LocalSend 发送/接收
-│       │   ├── entryability/  # EntryAbility + ShareAbility
-│       │   ├── extensionability/  # ShareExtensionAbility
-│       │   └── pages/         # Index + Share
-│       └── cpp/               # NAPI 桥接层
-├── scripts/
-│   ├── build-aar.sh           # 编译 Android AAR
-│   └── build-so.sh            # 编译 HarmonyOS .so
-└── .trae/specs/               # 需求规格与实现计划
+├── protocol/      LocalSend v2 协议说明（两端实现的唯一参考）
+├── go/            tsnet 桥接库，跨平台共享
+│   ├── tsnetbridge/   封装 Start/GetPeers/Dial/Listen/Read/Write/Accept
+│   └── cmd/cshared/   c-shared 入口（HarmonyOS 用）
+├── android/       Kotlin 应用，包名 com.slakey.anysend
+├── harmonyos/     ArkTS + C++，含自研 ADB 客户端与 scrcpy 流管理器
+├── macos/         LocalSend 分叉（Flutter），远控/镜像加在 Runner 原生层
+├── specs/         三份开发规格与任务清单
+└── scripts/       build-aar.sh / build-so.sh
 ```
 
-## 前置依赖
+## 网络层：三条路径
 
-| 依赖 | 用途 | 获取方式 |
-|---|---|---|
-| Go 1.22+ | 编译 tsnet 桥接库 | https://go.dev |
-| Tailscale 账号 | 登录 tailnet | https://tailscale.com |
-| Android Studio + NDK | 构建 Android 端 | https://developer.android.com/studio |
-| gomobile | 编译 Android AAR | `go install golang.org/x/mobile/cmd/gomobile@latest` |
-| OpenHarmony NDK | 交叉编译 Go → arm64 .so | https://gitee.com/openharmony |
-| DevEco Studio | 构建 HarmonyOS 端 | https://developer.harmonyos.com |
+1. **局域网直连**：系统网络栈，两端填对端 IP 即可，不依赖任何隧道。适合同 Wi-Fi 调试与日常家用。
+2. **移动端内嵌 tsnet**：`tsnet` 以用户态 netstack 运行，不需要 TUN 权限、不需要系统 VPN，Socket 流量经 `Dial/Listen` 走 WireGuard 加密隧道。设备发现不用 UDP 组播（Tailscale 不转发），改从 `GetPeers` 取同 tailnet 的节点与 100.64/10 地址。
+3. **macOS 原生 tailscaled**：Mac 侧不嵌 Go 桥，而是把开源 `tailscaled`/`tailscale` 二进制打在 `app/assets/tailscaled/`（约 40 MB），由应用经管理员授权装成 root LaunchDaemon（`com.slakey.anysend.tailscaled`，真实 `utun` 网卡），再用 `--operator` 让 GUI 免 sudo 控制 LocalAPI。因此 Mac 端跨网远控不需要 relay 做 loopback 转发。
 
-## 构建步骤
+## 线协议
 
-### 1. 获取 Tailscale Auth Key
+- **文件**：LocalSend v2，端口 `53317`。发送端 `register` → `send-request` → 逐个 `send`；接收端提供 `/info`、`/register`、`/send-request`、`/send`。细节见 `protocol/README.md`。
+- **画面**：端口 `27042`。建连后 `1B dummy` → `64B` 设备名（UTF-8 零填充）→ `12B` codec meta（`u32 "h264"` / `width` / `height`）→ 帧序列；每帧头 `12B`（`u64` 最高位 config 包、次高位关键帧、低 62 位 PTS µs）+ `u32` 长度，payload 为 Annex-B。
+- **控制**：端口 `27043`，scrcpy 控制消息子集（按键、文本、触摸、滚动、剪贴板）。字节定义以 `harmonyos/entry/src/main/ets/scrcpy/client/tools/ControlPacket.ets` 为唯一权威。
+- **镜像引导**：主控端先 `POST /api/anysend/v1/mirror-prepare?hs=0` 到对端 LocalSend 端口，Android 侧经 Shizuku 起 scrcpy-server 并返回 `videoPort`/`controlPort`/`scid`。
 
-在 [Tailscale 控制台](https://login.tailscale.com/admin/settings/keys) 生成一个 Auth Key（建议勾选 reusable、ephemeral 可选）。
+安卓镜像的实现路径：Shizuku UserService 以 shell UID（2000）执行 `app_process` 拉起 `scrcpy-server v3.3.4`（forward 模式），进程内桥接 `LocalSocket` ↔ TCP，两端按 video → control 顺序配对，无需 adb、无需无线调试配对。
 
-### 2. 构建 Android 端
+跨网镜像另有一条旁路：桥监听的端口只对局域网/热点可见（手机的 tsnet 是用户态栈，tailnet 包到不了这些 socket），因此 `MirrorTailnetProxy` 在 tailnet 上固定监听 `27052`/`27053`，逐条 pipe 到 `127.0.0.1:<桥端口>`。有真实网卡的对端（Mac 的 utun）直接连这两个端口；鸿蒙端因同样是用户态栈，跨网时回落到「加入安卓热点」这条路。
+
+## 构建
+
+### Android
 
 ```bash
-# 1. 编译 tsnet AAR
+# 1) tsnet AAR（可选；缺失时自动编译 src/stub 桩实现，只能直连局域网）
 export ANDROID_NDK_HOME=/path/to/android-ndk
-gomobile init
-./scripts/build-aar.sh
-# 产物: android/app/libs/tsnetbridge.aar
+./scripts/build-aar.sh          # 产物 android/app/libs/tsnetbridge.aar
 
-# 2. 用 Android Studio 打开 android/ 目录，构建并安装 APK
-# 或命令行:
+# 2) 应用
 cd android && ./gradlew assembleDebug
 ```
 
-### 3. 构建 HarmonyOS 端
+### HarmonyOS NEXT
 
 ```bash
-# 1. 交叉编译 Go tsnet 为 arm64 .so
+# 1) tsnet .so（可选；缺失时 CMake 以 TSNETBRIDGE_STUB 编译桩实现）
 export OHOS_NDK_HOME=/path/to/openharmony-ndk
 ./scripts/build-so.sh
-# 产物: go/cmd/cshared/out/libtsnetbridge.so
-
-# 2. 将 libtsnetbridge.so 复制到 HarmonyOS 工程的 libs 目录
 mkdir -p harmonyos/entry/src/main/libs/arm64-v8a
 cp go/cmd/cshared/out/libtsnetbridge.so harmonyos/entry/src/main/libs/arm64-v8a/
 
-# 3. 用 DevEco Studio 打开 harmonyos/ 目录，构建 HAP 并安装
+# 2) 用 DevEco Studio 打开 harmonyos/ 构建 HAP
 ```
 
-## 使用方法
+> **原生层依赖（重要）**：`harmonyos/entry/src/main/cpp/scrcpy/CMakeLists.txt` 会 `add_subdirectory(thirdparty/boringssl)` 并链接 `ssl`/`crypto`，所以 `thirdparty/boringssl`（约 226 MB）与 `thirdparty/concurrentqueue`（约 16 MB）是**构建必需**的。这两个目录体积过大，未纳入 git（见 `.gitignore`），换机器或重新克隆后需要自行放回原目录，否则鸿蒙原生层无法编译。
 
-1. **两台设备分别安装**对应平台的应用。
-2. **登录 Tailscale**：打开应用，输入 Tailscale Auth Key，点击"登录并连接"。
-3. **发送文件**：在文件管理器/相册中选择文件 → 分享 → 选择"TS LocalSend" → 从在线设备列表中选择目标设备 → 等待传输完成。
-4. **接收文件**：应用在后台运行时自动接收（当前实现默认自动接受）。Android 保存到 Download 目录，HarmonyOS 保存到应用 files 目录。
+### macOS
 
-## 协议说明
-
-LocalSend v2 协议的完整定义见 [protocol/README.md](protocol/README.md)。核心流程：
-
-```
-发送端 register → send-request → send（逐个文件）
-接收端 /info → /register → /send-request → /send
+```bash
+cd macos
+fvm install            # 版本由 .fvmrc 固定（Flutter 3.41.9）
+fvm flutter pub get
+fvm flutter build macos --release
 ```
 
-所有 HTTP 请求走 Tailscale IP:53317，不使用组播发现。
+bundle id 为 `com.slakey.anysend.mac`，与官方 LocalSend 分开，避免 TCC 授权串味。首次使用远控需授予「屏幕录制」与「辅助功能」，改授权后需重启应用。安装 tailscaled 需一次管理员授权。
 
-## 直连局域网模式（本地测试，无需 Tailscale）
+## 使用要点
 
-如果本机没有 gomobile / OpenHarmony NDK 工具链，无法编译 Tailscale 原生库，可以使用**直连局域网模式**进行本地测试。此模式下应用走系统网络栈（Java Socket / @ohos.net.socket），两台设备只需连同一个 Wi-Fi 即可互传文件。
+- **传文件**：任一端的分享面板选中文件 → 选择 AnySend → 选目标设备。
+- **镜像安卓**：安卓端完成 Shizuku 授权并启动接收服务，鸿蒙/Mac 端在镜像页连接；同一局域网最稳，跨网依赖隧道。
+- **远控 Mac**：Mac 端在「远控」分区打开开关、设 6 位 PIN；手机端输入 PIN 连接。PIN 为长度前缀 + UTF-8 明文的简单校验，仅在可信 tailnet 内使用。
+- **接收落盘**：Android 存 `Download`，HarmonyOS 存应用 `files` 目录。
 
-### 原生依赖是可选的
+## 已知限制
 
-- **Android**：`android/app/libs/tsnetbridge.aar` 不存在时，Gradle 会自动编译 `src/stub/java/tsnetbridge/Tsnetbridge.java` 桩实现，项目仍可正常构建。
-- **HarmonyOS**：`go/cmd/cshared/out/libtsnetbridge.so` 不存在时，CMake 会以 `TSNETBRIDGE_STUB` 宏编译 `napi_bridge.cpp`，生成桩版 `libtsnapi.so`，ArkTS 侧 `TsnapiLoader` 会自动检测并回退到直连模式。
+- 移动端 tsnet 与 Mac 端 tailscaled 是两套实现，账号/节点状态互不可见，需分别登录同一 tailnet。
+- macOS 被控端未排除自身窗口（`SCContentFilter(excludingWindows: [])`），整屏共享。
+- PIN 鉴权无 challenge/HMAC、无设备指纹记忆；控制口与视频口各自校验。
+- 鸿蒙原生层依赖本地 `thirdparty/`（见上），仓库不自带。
+- 无自动化测试；`specs/` 各任务的实测项（首帧延迟、30 分钟稳定性、折叠屏切换）仍需真机复核。
 
-### 本地测试步骤（Android ↔ HarmonyOS）
+## 文档
 
-1. **两台设备连同一个 Wi-Fi**。
-2. **接收端**打开应用，点击「启动接收服务（直连模式）」，记下界面显示的本机 IP（Android 自动显示；HarmonyOS 请到系统 Wi-Fi 设置查看）。
-3. **发送端**在文件管理器/相册中选择文件 → 分享 → 选择「TS LocalSend」。
-4. 在分享界面的「直连模式：输入接收方 IP」框中输入接收端 IP，点击「发送到该 IP」。
-5. 等待传输完成。接收端：Android 保存到 Download 目录，HarmonyOS 保存到应用 files 目录。
-
-> 也可以 Android↔Android 或 HarmonyOS↔HarmonyOS 互传，只要两端都用直连模式。
-
-### 切回 Tailscale 模式
-
-当工具链就绪后：
-- Android：运行 `./scripts/build-aar.sh` 生成 `tsnetbridge.aar`，重新构建即可。
-- HarmonyOS：运行 `./scripts/build-so.sh` 生成 `libtsnetbridge.so`，重新构建即可。
-
-CMake / Gradle 会自动检测到原生库并启用 Tailscale 功能。
-
-## 注意事项
-
-- 两台设备必须登录**同一个** Tailscale 网络（tailnet）。
-- HarmonyOS NEXT 端的 Go 交叉编译依赖 OpenHarmony NDK 的 clang，已在 linux/arm64 验证 c-shared 编译通过。
-- 当前接收端默认自动接受所有文件，可在 `LocalSendServer` 中修改为需要用户确认。
-- Tailscale Auth Key 请妥善保管，勿提交到代码仓库。
-- 直连模式下请确保两台设备在同一局域网，且接收端防火墙未拦截 53317 端口。
+| 文件 | 内容 |
+|---|---|
+| `protocol/README.md` | LocalSend v2 线协议 |
+| `specs/scrcpy-mirror-shizuku/spec.md` | 安卓镜像（Shizuku 桥）现行方案 |
+| `specs/scrcpy-mirror-phase1/spec.md` | 早期无线 ADB 方案，已被取代，留作历史 |
+| `specs/mac-remote-desktop/spec.md` | Mac 远控规格 |

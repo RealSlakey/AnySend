@@ -1,5 +1,8 @@
 # scrcpy 镜像一期 · 任务分解
 
+> ⚠️ **已废弃，仅作历史记录**：本方案的无线 ADB / SPAKE2 配对被 `specs/scrcpy-mirror-shizuku` 取代（安卓开热点时与该方案互斥）。
+> 成果去向：T1 的 native 解码器（`vdInit/vdPush/vdRelease`）仍被现行方案直接复用；T2 的 ADB 协议层已由 ArkTS 迁到 C++（`cpp/scrcpy/adb/`，含 `AdbKeyPair`、`PairingAuth`），`ets/adb/` 下只剩 `MirrorAutoConnect.ets`；T3 的帧解析并入 `scrcpy/client/tools/`。
+
 ## T1 native 解码器（cpp）
 - [x] `cpp/video_decoder.cpp`：单例封装 OH_AVCodec（surface 模式），互斥队列，NAPI 三函数 vdInit/vdPush/vdRelease
 - [x] `cpp/CMakeLists.txt` + `cpp/napi_bridge.cpp` 注册；`ets/bridge/TsnapiLoader.ets` 接口与 Stub 同步
