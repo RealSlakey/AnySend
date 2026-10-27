@@ -283,13 +283,8 @@ struct ShareView {
       return;
     }
 
-    const accepted: string[] = [];
-    const fileIds: string[] = Object.keys(result.response.files);
-    for (let i = 0; i < fileIds.length; i++) {
-      if (result.response.files[fileIds[i]] === 'accept') {
-        accepted.push(fileIds[i]);
-      }
-    }
+    // v2 wire format: response.files maps fileId -> per-file upload token
+    const accepted: string[] = Object.keys(result.response.files);
     if (accepted.length === 0) {
       this.progressText = '所有文件被拒绝';
       this.sending = false;
@@ -318,7 +313,8 @@ struct ShareView {
       if (!filePath) {
         continue;
       }
-      const ok = await sender.sendFile(result.response.sessionId, fileId, filePath, (sent, total) => {
+      const ok = await sender.sendFile(result.response.sessionId, fileId,
+        result.response.files[fileId] ?? '', filePath, (sent, total) => {
         const overall = sentBytes + sent;
         this.progress = totalBytes > 0 ? Math.floor((overall / totalBytes) * 100) : 0;
         this.progressText = `发送中 ${Math.floor(overall / 1024)}/${Math.floor(totalBytes / 1024)} KB`;

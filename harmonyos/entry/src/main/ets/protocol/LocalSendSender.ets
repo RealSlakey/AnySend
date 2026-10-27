@@ -162,8 +162,10 @@ export class LocalSendSender {
    * Step 3: upload a single file with progress callback.
    * filePath can be a file path or a content:// URI.
    * progress(sentBytes, totalBytes)
+   * fileToken: per-file token from the send-request response (v2 spec);
+   * the receiver rejects uploads without it.
    */
-  async sendFile(sessionId: string, fileId: string, filePath: string, progress: (sent: number, total: number) => void): Promise<boolean> {
+  async sendFile(sessionId: string, fileId: string, fileToken: string, filePath: string, progress: (sent: number, total: number) => void): Promise<boolean> {
     const conn = await this.openConn();
     if (conn <= 0) {
       return false;
@@ -174,7 +176,7 @@ export class LocalSendSender {
       const mime = guessMime(fileName);
       // Text uploads carry their charset; the metadata fileType stays text/plain.
       const contentType = mime.startsWith('text/') ? `${mime}; charset=utf-8` : mime;
-      const path = `${LocalSendConst.PATH_SEND}?sessionId=${sessionId}&fileId=${fileId}`;
+      const path = `${LocalSendConst.PATH_SEND}?sessionId=${sessionId}&fileId=${fileId}&token=${fileToken}`;
       const headerLines: string[] = [
         `POST ${path} HTTP/1.1`,
         `Host: ${this.receiverIp}:${LocalSendConst.PORT}`,

@@ -101,18 +101,19 @@ bundle id 为 `com.slakey.anysend.mac`，与官方 LocalSend 分开，避免 TCC
 
 ## 使用要点
 
-- **传文件**：任一端的分享面板选中文件 → 选择 AnySend → 选目标设备。
-- **镜像安卓**：安卓端完成 Shizuku 授权并启动接收服务，鸿蒙/Mac 端在镜像页连接；同一局域网最稳，跨网依赖隧道。
-- **远控 Mac**：Mac 端在「远控」分区打开开关、设 6 位 PIN；手机端输入 PIN 连接。PIN 为长度前缀 + UTF-8 明文的简单校验，仅在可信 tailnet 内使用。
-- **接收落盘**：Android 存 `Download`，HarmonyOS 存应用 `files` 目录。
+- **传文件**：任一端的分享面板选中文件 → 选择 AnySend → 选目标设备。接收端按 LocalSend v2 规范下发每文件 token，上传 URL 必须带回（旧版固定返回 "accept" 且不校验，等于无鉴权写入）。
+- **镜像安卓**：安卓端完成 Shizuku 授权并启动接收服务，鸿蒙/Mac 端在镜像页连接；同一局域网最稳，跨网依赖隧道。**需配对码**：`mirror-prepare`（会开热点、拉起采集桥并返回热点密码）与 `/apps`（应用清单）要求 `X-Relay-Token` 头，取值即安卓 SMS 页显示的配对码——鸿蒙端在设置里填过即自动带上，Mac 端在镜像分区的「配对码」框填一次。
+- **远控 Mac**：Mac 端在「远控」分区打开开关、设 6 位 PIN；手机端输入 PIN 连接。PIN 为长度前缀 + UTF-8 明文的简单校验，仅在可信 tailnet 内使用；错误 PIN 有指数退避冷却（1→60s）。
+- **接收落盘**：Android 存 `Download`，HarmonyOS 存应用 `files` 目录。接收为流式写盘（256KB 块），文件大小只受磁盘限制，不再整块进内存。
 
 ## 已知限制
 
 - 移动端 tsnet 与 Mac 端 tailscaled 是两套实现，账号/节点状态互不可见，需分别登录同一 tailnet。
 - macOS 被控端未排除自身窗口（`SCContentFilter(excludingWindows: [])`），整屏共享。
-- PIN 鉴权无 challenge/HMAC、无设备指纹记忆；控制口与视频口各自校验。
+- PIN 鉴权无 challenge/HMAC、无设备指纹记忆；控制口与视频口各自校验，传输全程明文（tailnet 路径由 WireGuard 加密兜底，局域网直连路径不加密）。
+- 镜像桥启动后，scrcpy 视频/控制端口本身无鉴权（scrcpy 协议限制）：鉴权点在 `mirror-prepare`（未带配对码无法启动桥、拿不到热点密码），桥存续期内同网段主机仍可对临时端口做扫描直连。
 - 鸿蒙原生层依赖本地 `thirdparty/`（见上），仓库不自带。
-- 无自动化测试；`specs/` 各任务的实测项（首帧延迟、30 分钟稳定性、折叠屏切换）仍需真机复核。
+- 无端到端自动化测试；`HttpBodyReader` 有 JVM 单元测试（Android 侧），`specs/` 各任务的实测项（首帧延迟、30 分钟稳定性、折叠屏切换）仍需真机复核。
 
 ## 文档
 

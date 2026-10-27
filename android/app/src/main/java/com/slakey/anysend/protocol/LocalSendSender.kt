@@ -167,10 +167,14 @@ class LocalSendSender(
 
     /**
      * Step 3: upload a single file with progress reporting.
+     *
+     * [fileToken] is the per-file token from the send-request response
+     * (v2 wire format); the receiver rejects uploads without it.
      */
     suspend fun sendFile(
         sessionId: String,
         fileId: String,
+        fileToken: String,
         file: File,
         progress: (Long, Long) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
@@ -180,7 +184,7 @@ class LocalSendSender(
             val mime = guessMime(file.name)
             val uploadType = if (mime.startsWith("text/")) "$mime; charset=utf-8" else mime
             val total = file.length()
-            val path = "${LocalSendConst.PATH_UPLOAD}?sessionId=$sessionId&fileId=$fileId"
+            val path = "${LocalSendConst.PATH_UPLOAD}?sessionId=$sessionId&fileId=$fileId&token=$fileToken"
             val header = StringBuilder()
                 .append("POST $path HTTP/1.1\r\n")
                 .append("Host: $receiverIp:${LocalSendConst.PORT}\r\n")

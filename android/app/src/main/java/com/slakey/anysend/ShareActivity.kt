@@ -221,7 +221,8 @@ class ShareActivity : AppCompatActivity() {
                 tvProgress.text = "发送请求被拒绝"
                 return@launch
             }
-            val acceptedFiles = resp.response.files.filter { it.value == "accept" }
+            // v2 wire format: response.files maps fileId -> per-file upload token
+            val acceptedFiles = resp.response.files
             if (acceptedFiles.isEmpty()) {
                 tvProgress.text = "所有文件被拒绝"
                 return@launch
@@ -231,10 +232,10 @@ class ShareActivity : AppCompatActivity() {
             }
             var sentBytes = 0L
             var allOk = true
-            for ((fileId, _) in acceptedFiles) {
+            for ((fileId, fileToken) in acceptedFiles) {
                 val file = resp.fileIdToFile[fileId] ?: continue
                 val ok = withContext(Dispatchers.IO) {
-                    sender.sendFile(resp.response.sessionId, fileId, file) { sent, total ->
+                    sender.sendFile(resp.response.sessionId, fileId, fileToken, file) { sent, total ->
                         runOnUiThread {
                             val overall = sentBytes + sent
                             progressBar.progress = if (totalBytes > 0) (overall * 100 / totalBytes).toInt() else 0

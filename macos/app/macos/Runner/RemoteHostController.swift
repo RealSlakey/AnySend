@@ -276,6 +276,31 @@ final class RemoteHostController: NSObject {
         case control
     }
 
+    // MARK: - PIN brute-force protection
+    //
+    // The PIN travels as plain bytes over raw TCP, so on a hostile LAN the
+    // only thing standing between an attacker and the screen is how fast the
+    // listener answers wrong guesses. Global state (not per-peer): source
+    // spoofing is cheap, per-peer maps are not.
+
+    private var authFailures = 0
+    private var authBlockedUntil = Date.distantPast
+
+    /// Exponential backoff, capped at 60 s: 1, 2, 4 ... 60 s between tries.
+    private var authCooldown: TimeInterval {
+        min(pow(2.0, Double(min(authFailures, 6))), 60)
+    }
+
+    /// Constant-time equality so PIN comparison timing leaks nothing.
+    private static func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
+        guard !a.isEmpty, a.count == b.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<a.count {
+            diff |= a[i] ^ b[i]
+        }
+        return diff == 0
+    }
+
     private func accept(_ connection: NWConnection, kind: ConnectionKind) {
         let queue = kind == .video ? videoQueue : controlQueue
         connection.start(queue: queue)
@@ -283,7 +308,15 @@ final class RemoteHostController: NSObject {
         diag("accept \(kind == .video ? "video" : "control") from \(remote) pinSet=\(!config.pin.isEmpty)")
 
         if config.pin.isEmpty {
+            // Explicit operator choice, but say it out loud in the log: this
+            // means anyone who can reach the ports controls this Mac.
+            diag("WARNING: PIN is empty — remote control is unauthenticated")
             ready(connection, kind: kind)
+            return
+        }
+        if Date() < authBlockedUntil {
+            diag("auth blocked (cooldown) dropping \(kind == .video ? "video" : "control") from \(remote)")
+            connection.cancel()
             return
         }
         authenticate(connection, kind: kind)
@@ -307,13 +340,18 @@ final class RemoteHostController: NSObject {
                     connection.cancel()
                     return
                 }
-                let pin = String(data: data, encoding: .utf8) ?? ""
-                guard pin == self.config.pin else {
+                let expected = Data(self.config.pin.utf8)
+                guard Self.constantTimeEqual(data, expected) else {
+                    self.authFailures += 1
+                    self.authBlockedUntil = Date().addingTimeInterval(self.authCooldown)
                     self.lastError = "wrong_pin"
-                    self.diag("auth failed kind=\(kind == .video ? "video" : "control") wrong_pin")
+                    self.diag("auth failed kind=\(kind == .video ? "video" : "control") wrong_pin " +
+                              "failures=\(self.authFailures) cooldown=\(Int(self.authCooldown))s")
                     connection.cancel()
                     return
                 }
+                self.authFailures = 0
+                self.authBlockedUntil = .distantPast
                 self.diag("auth ok kind=\(kind == .video ? "video" : "control")")
                 self.ready(connection, kind: kind)
             }

@@ -56,7 +56,7 @@ export interface SendRequest {
 
 export interface SendRequestResponse {
   sessionId: string;
-  files: Record<string, string>; // fileId -> "accept" | "cancel"
+  files: Record<string, string>; // fileId -> per-file upload token (v2 spec)
 }
 
 export interface CancelRequest {

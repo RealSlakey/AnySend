@@ -53,6 +53,7 @@ export class LocalSendServer {
   private running: boolean = false;
   private decisions: Record<string, boolean> = {};
   private pendingFileNames: Map<string, string> = new Map();
+  private pendingFileTokens: Map<string, string> = new Map();
   private pendingAliases: Map<string, string> = new Map();
   private context: common.UIAbilityContext;
 
@@ -258,7 +259,12 @@ export class LocalSendServer {
     const accepted: Record<string, string> = {};
     const senderAlias = sendReq.info.alias && sendReq.info.alias.length > 0 ? sendReq.info.alias : '未知设备';
     for (const fileId of Object.keys(sendReq.files)) {
-      accepted[fileId] = 'accept';
+      // Per the v2 wire format the response maps fileId -> token (not
+      // "accept"); the sender must echo that token on the upload URL.
+      // Values were a literal "accept" before, which left /upload open.
+      const token = generateUUID();
+      accepted[fileId] = token;
+      this.pendingFileTokens.set(fileId, token);
       this.decisions[fileId] = true;
       if (sendReq.files[fileId] && sendReq.files[fileId].fileName) {
         this.pendingFileNames.set(fileId, sendReq.files[fileId].fileName);
@@ -281,12 +287,18 @@ export class LocalSendServer {
     // The fileId must have been announced via prepare-upload. The old code
     // fell back to received_<fileId> and wrote anyway — that was an
     // unauthenticated arbitrary-file-write primitive.
-    const pending = this.pendingFileNames.get(fileId);
-    if (!pending) {
+    const expectedToken = this.pendingFileTokens.get(fileId);
+    const expectedFileName = this.pendingFileNames.get(fileId);
+    if (!expectedToken || !expectedFileName) {
       return { status: 404, contentType: 'text/plain', body: stringToArrayBuffer('unknown fileId') };
     }
+    const sentToken = req.query['token'] ?? '';
+    if (sentToken.length === 0 || sentToken !== expectedToken) {
+      return { status: 403, contentType: 'text/plain', body: stringToArrayBuffer('token mismatch') };
+    }
+    this.pendingFileTokens.delete(fileId);
     this.pendingFileNames.delete(fileId);
-    const safeName = pending.replace(/[\/\\:*?"<>|]/g, '_');
+    const safeName = expectedFileName.replace(/[\/\\:*?"<>|]/g, '_');
     const dir = `${this.context.filesDir}/Received`;
     try {
       if (!fs.accessSync(dir)) {

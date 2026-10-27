@@ -128,7 +128,10 @@ export class MirrorAutoConnect {
       }
     }
     if (info === null || (info.videoPort <= 0 && info.ip.length === 0)) {
-      onNote?.('安卓端未响应镜像准备请求');
+      onNote?.(MirrorAutoConnect.lastPrepareError.length > 0
+        ? MirrorAutoConnect.lastPrepareError
+        : '安卓端未响应镜像准备请求');
+      MirrorAutoConnect.lastPrepareError = '';
       return null;
     }
 
@@ -271,6 +274,23 @@ export class MirrorAutoConnect {
     return [];
   }
 
+  /**
+   * Device pairing token shared with the Android peer (the same code the SMS
+   * relay uses). Privileged AnySend routes — mirror-prepare (starts a screen
+   * bridge and hands out hotspot credentials) and /apps — reject requests
+   * without it.
+   */
+  static deviceToken(): string {
+    try {
+      return SmsStore.getInstance().token;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /** Human-readable reason the last mirror-prepare failed ('' when none). */
+  static lastPrepareError: string = '';
+
   /** GET /api/anysend/v1/apps over tsnet; null when the peer did not answer. */
   private static async getApps(tailnetIp: string, forceRefresh: boolean): Promise<AppEntry[] | null> {
     const layer: NetworkLayer = new TailscaleNetworkLayer();
@@ -281,9 +301,11 @@ export class MirrorAutoConnect {
     }
     try {
       const path = forceRefresh ? `${APPS_PATH}?refresh=1` : APPS_PATH;
+      const token = MirrorAutoConnect.deviceToken();
       const req = `GET ${path} HTTP/1.1\r\n` +
         `Host: ${addr}\r\n` +
         'Accept: application/json\r\n' +
+        (token.length > 0 ? `X-Relay-Token: ${token}\r\n` : '') +
         'Connection: close\r\n\r\n';
       const sent = await layer.write(conn, utf8Encode(req));
       if (sent <= 0) {
@@ -336,16 +358,22 @@ export class MirrorAutoConnect {
       const path = virtualDisplay
         ? `${MIRROR_PREPARE_PATH}${MirrorAutoConnect.vdQuery(vd)}`
         : MIRROR_PREPARE_PATH;
+      const token = MirrorAutoConnect.deviceToken();
       const req = `POST ${path} HTTP/1.1\r\n` +
         `Host: ${addr}\r\n` +
         'Content-Type: application/json\r\n' +
         'Content-Length: 0\r\n' +
+        (token.length > 0 ? `X-Relay-Token: ${token}\r\n` : '') +
         'Connection: close\r\n\r\n';
       const sent = await layer.write(conn, utf8Encode(req));
       if (sent <= 0) {
         return none;
       }
       const reply = await MirrorAutoConnect.readHttpReply(layer, conn, TAILNET_HTTP_TIMEOUT_MS);
+      if (reply.status === 401) {
+        MirrorAutoConnect.lastPrepareError = '安卓端要求配对码：在设置里填入安卓 SMS 页显示的配对码';
+        return none;
+      }
       if (reply.status !== 200 || reply.body.length === 0) {
         return none;
       }

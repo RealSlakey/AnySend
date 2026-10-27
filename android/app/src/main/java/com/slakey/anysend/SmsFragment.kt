@@ -76,7 +76,7 @@ class SmsFragment : Fragment() {
         }
         tvSmsStatus.text = sb.toString()
         btnSmsPerms.text = if (granted == smsPermissions.size) "重新授权" else "开启短信权限"
-        tvSmsToken.text = "配对码：${SmsRelay(ctx).token}"
+        tvSmsToken.text = "配对码：${SmsRelay(ctx).token}（短信中转与屏幕镜像/应用推流共用）"
     }
 
     private fun requestSmsPermissions() {

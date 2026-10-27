@@ -192,6 +192,24 @@ final class AndroidMirrorController: NSObject {
 
     // MARK: - Discovery
 
+    /// Device pairing token shared with the Android peer. The Flutter UI
+    /// stores it via shared_preferences, which lands in NSUserDefaults under
+    /// the "flutter." prefix — reading it here needs no channel round-trip.
+    /// The Android side requires it on mirror-prepare and /apps (they start a
+    /// screen-capture bridge / hand out hotspot credentials).
+    fileprivate static var deviceToken: String {
+        UserDefaults.standard.string(forKey: "flutter.mirror_device_token") ?? ""
+    }
+
+    fileprivate static func authorize(_ request: URLRequest) -> URLRequest {
+        var request = request
+        let token = deviceToken
+        if !token.isEmpty {
+            request.setValue(token, forHTTPHeaderField: "X-Relay-Token")
+        }
+        return request
+    }
+
     /// Ask the Android peer to spawn scrcpy-server and report its endpoints.
     private func prepare(host: String, mode: Mode, completion: @escaping @MainActor (Result<Endpoint, Error>) -> Void) {
         var components = URLComponents(string: "http://\(host):53317/api/anysend/v1/mirror-prepare")
@@ -209,10 +227,15 @@ final class AndroidMirrorController: NSObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
+        request = Self.authorize(request)
         // Android blocks up to ~8 s spawning the bridge; the rest is headroom.
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        URLSession.shared.dataTask(with: request) { data, response, error in
             if let error {
                 Task { @MainActor in completion(.failure(MirrorError.prepareFailed(error.localizedDescription))) }
+                return
+            }
+            if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+                Task { @MainActor in completion(.failure(MirrorError.prepareFailed("安卓端要求配对码：在设置里填入安卓 SMS 页显示的配对码"))) }
                 return
             }
             guard let data,
@@ -313,9 +336,14 @@ final class AndroidMirrorController: NSObject {
         request.httpMethod = "GET"
         // ~120 base64 icons ride along; the relay can be slow.
         request.timeoutInterval = 45
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        request = Self.authorize(request)
+        URLSession.shared.dataTask(with: request) { data, response, error in
             if let error {
                 Task { @MainActor in completion(.failure(MirrorError.prepareFailed(error.localizedDescription))) }
+                return
+            }
+            if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+                Task { @MainActor in completion(.failure(MirrorError.prepareFailed("安卓端要求配对码：在设置里填入安卓 SMS 页显示的配对码"))) }
                 return
             }
             guard let data,

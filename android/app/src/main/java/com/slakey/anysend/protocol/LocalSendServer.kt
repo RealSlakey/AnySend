@@ -55,6 +55,9 @@ class LocalSendServer(
         val files: Map<String, FileInfo>
     ) {
         val received = AtomicInteger(0)
+
+        /** Per-file upload tokens handed back in prepare-upload (v2 spec). */
+        val fileTokens = HashMap<String, String>()
     }
 
     /** sessionId -> session metadata (bounded, eldest evicted). */
@@ -70,8 +73,20 @@ class LocalSendServer(
     /**
      * Optional SMS relay routes under /api/sms/. Null disables the SMS API —
      * the server then answers 404 so unpaired peers learn nothing.
+     *
+     * Its pairing token doubles as the device token for the privileged
+     * AnySend routes (/mirror-prepare): one code to read off the Android UI
+     * and paste into each peer.
      */
     var smsRelay: com.slakey.anysend.sms.SmsRelay? = null
+
+    /** True when [headers] carries the correct device pairing token. */
+    private fun hasDeviceToken(headers: Map<String, String>): Boolean {
+        val relay = smsRelay ?: return false
+        val sent = headers.entries
+            .firstOrNull { it.key.equals("x-relay-token", ignoreCase = true) }?.value ?: ""
+        return sent.isNotEmpty() && sent == relay.token
+    }
 
     /** Set the decision for a session (called by UI after user chooses). */
     fun setSessionDecision(sessionId: String, acceptedFileIds: Set<String>) {
@@ -259,10 +274,13 @@ class LocalSendServer(
             // and report our IPv4 + adbd port as pure JSON, deliberately
             // separate from the LocalSend v2 response shapes above.
             // ?vd=1 asks for a virtual-display session (see mirrorServerArgs).
+            // Privileged: starts a screen-capture bridge and hands out the
+            // hotspot key, so it requires the device pairing token.
             req.method == "POST" && req.path == LocalSendConst.PATH_MIRROR_PREPARE -> handleMirrorPrepare(req)
             req.method == "GET" && req.path == LocalSendConst.PATH_MIRROR_PREPARE -> handleMirrorPrepare(req)
 
             // 应用推流：可启动应用清单（含图标），供鸿蒙端宫格选择。
+            // 暴露本机应用清单，同样要求设备配对码。
             req.method == "GET" && req.path == LocalSendConst.PATH_APPS -> handleApps(req)
 
             else -> HttpResponse(404, "text/plain", "Not Found".toByteArray())
@@ -285,6 +303,9 @@ class LocalSendServer(
      * geometry.
      */
     private fun handleMirrorPrepare(req: HttpRequest): HttpResponse {
+        if (!hasDeviceToken(req.headers)) {
+            return HttpResponse(401, "application/json", """{"error":"token mismatch"}""".toByteArray())
+        }
         val virtualDisplay = req.query["vd"] == "1"
         val vdWidth = req.query["w"]?.toIntOrNull() ?: 0
         val vdHeight = req.query["h"]?.toIntOrNull() ?: 0
@@ -403,6 +424,9 @@ class LocalSendServer(
      * icons is expensive and the list rarely changes within a session.
      */
     private fun handleApps(req: HttpRequest): HttpResponse {
+        if (!hasDeviceToken(req.headers)) {
+            return HttpResponse(401, "application/json", """{"error":"token mismatch"}""".toByteArray())
+        }
         // `?refresh=1` re-reads the inventory (the peer's refresh button), so a
         // newly installed app shows up without restarting the app.
         if (req.query["refresh"] == "1") {
@@ -543,14 +567,19 @@ class LocalSendServer(
         val sessionId = UUID.randomUUID().toString()
         // Notify UI; in this minimal impl we auto-accept all (configurable).
         onSendRequest?.invoke(sendReq.info, sendReq.files)
-        // Auto-accept by default
-        sendReq.files.keys.forEach { decisions[it] = true }
-        val accepted = sendReq.files.mapValues { "accept" }
+        // Auto-accept by default. Per the v2 wire format the response maps
+        // fileId -> token (not "accept"); the sender must echo that token on
+        // the upload URL. Values were a literal "accept" before, which made
+        // /upload unauthenticated — anyone could write files.
+        val session = PendingSession(
+            senderAlias = sendReq.info.alias.ifBlank { "未知设备" },
+            files = sendReq.files
+        )
+        val accepted = sendReq.files.mapValues { (fileId, _) ->
+            UUID.randomUUID().toString().also { session.fileTokens[fileId] = it }
+        }
         synchronized(pendingSessions) {
-            pendingSessions[sessionId] = PendingSession(
-                senderAlias = sendReq.info.alias.ifBlank { "未知设备" },
-                files = sendReq.files
-            )
+            pendingSessions[sessionId] = session
         }
         val resp = SendRequestResponse(sessionId = sessionId, files = accepted)
         return HttpResponse(200, "application/json", gson.toJson(resp).toByteArray())
@@ -563,6 +592,12 @@ class LocalSendServer(
             ?: return HttpResponse(404, "text/plain", "unknown session".toByteArray())
         val meta = session.files[fileId]
             ?: return HttpResponse(404, "text/plain", "unknown fileId".toByteArray())
+        // Validate the per-file token from prepare-upload before touching disk.
+        val sentToken = req.query["token"] ?: ""
+        val expected = synchronized(pendingSessions) { session.fileTokens[fileId] } ?: ""
+        if (sentToken.isEmpty() || sentToken != expected) {
+            return HttpResponse(403, "text/plain", "token mismatch".toByteArray())
+        }
         // Keep the sender's original filename; fall back to a safe stub.
         val safeName = meta.fileName.replace(Regex("[\\\\/:*?\"<>|\u0000]"), "_").ifBlank { "file.bin" }
         // Open the destination before consuming the body so nothing large is

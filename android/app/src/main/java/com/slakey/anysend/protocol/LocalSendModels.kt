@@ -56,7 +56,7 @@ data class SendRequest(
 /** POST /send-request response: per-file decision */
 data class SendRequestResponse(
     val sessionId: String,
-    val files: Map<String, String> // fileId -> "accept" | "cancel"
+    val files: Map<String, String> // fileId -> per-file upload token (v2 spec)
 )
 
 /** POST /cancel body */

@@ -28,9 +28,14 @@ class AndroidMirrorSection extends StatefulWidget {
 
 class _AndroidMirrorSectionState extends State<AndroidMirrorSection> {
   static const _keyHost = 'anysend_android_mirror_host';
+  /// Stored via shared_preferences so the native side can read it straight
+  /// from NSUserDefaults ("flutter.mirror_device_token") — see
+  /// AndroidMirrorController.deviceToken.
+  static const _keyDeviceToken = 'mirror_device_token';
 
   final TextEditingController _hostController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
+  final TextEditingController _tokenController = TextEditingController();
 
   AndroidMirrorStatus _status = AndroidMirrorStatus.empty;
   bool _loading = true;
@@ -69,6 +74,7 @@ class _AndroidMirrorSectionState extends State<AndroidMirrorSection> {
     AndroidMirrorService.setErrorListener(null);
     _hostController.dispose();
     _searchController.dispose();
+    _tokenController.dispose();
     super.dispose();
   }
 
@@ -76,6 +82,7 @@ class _AndroidMirrorSectionState extends State<AndroidMirrorSection> {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
     _hostController.text = prefs.getString(_keyHost) ?? '';
+    _tokenController.text = prefs.getString(_keyDeviceToken) ?? '';
     await _refreshStatus();
     if (!mounted) return;
     setState(() => _loading = false);
@@ -131,6 +138,9 @@ class _AndroidMirrorSectionState extends State<AndroidMirrorSection> {
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyHost, host);
+    // Persist the pairing token so AndroidMirrorController (Swift) can read
+    // it from NSUserDefaults when it calls the privileged routes.
+    await prefs.setString(_keyDeviceToken, _tokenController.text.trim());
     return host;
   }
 
@@ -168,6 +178,9 @@ class _AndroidMirrorSectionState extends State<AndroidMirrorSection> {
       setState(() => _error = '请先选择或输入安卓设备地址');
       return;
     }
+    // Refresh button skips _requireHost; keep the token current anyway.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyDeviceToken, _tokenController.text.trim());
     setState(() {
       _appsLoading = true;
       _appsNote = '正在读取安卓端应用列表…';
@@ -300,6 +313,17 @@ class _AndroidMirrorSectionState extends State<AndroidMirrorSection> {
           decoration: const InputDecoration(
             labelText: '安卓设备地址',
             hintText: 'Tailscale 100.x 或局域网 IP',
+            isDense: true,
+          ),
+          onSubmitted: (_) => _busy ? null : _startMirror(),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _tokenController,
+          obscureText: true,
+          decoration: const InputDecoration(
+            labelText: '配对码',
+            hintText: '安卓 SMS 页显示的配对码',
             isDense: true,
           ),
           onSubmitted: (_) => _busy ? null : _startMirror(),
