@@ -27,8 +27,6 @@ harmonyos/oh_modules/
 # hvigor 构建报告缓存（项目根，非 harmonyos/hvigor 配置文件）
 /.hvigor/
 harmonyos/.hvigor/
-# scrcpy 原生层未引用的第三方源码（boringssl/concurrentqueue，约 242MB，CMake 不引用）
-harmonyos/entry/src/main/cpp/scrcpy/thirdparty/
 
 # === Go ===
 go/bin/
