@@ -16,13 +16,19 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import util from '@ohos.util';
 import { HistoryStore } from '../common/HistoryStore';
+import { HttpBodyReader, BodyTooLargeException, HeadTooLargeException } from './HttpBodyReader';
+
+// Hard caps: request head 64 KB, JSON bodies 8 MB. Uploads are never
+// buffered — they stream straight to disk via HttpBodyReader.copyToFile.
+const MAX_HEADER_BYTES = 64 * 1024;
+const MAX_META_BODY = 8 * 1024 * 1024;
 
 interface HttpRequest {
   method: string;
   path: string;
   query: Record<string, string>;
   headers: Record<string, string>;
-  body: ArrayBuffer;
+  body: HttpBodyReader;
 }
 
 interface HttpResponse {
@@ -103,10 +109,21 @@ export class LocalSendServer {
       if (!request) {
         return;
       }
-      const response = this.route(request, conn);
+      const response = await this.route(request);
       await this.writeHttpResponse(network, conn, response);
     } catch (e) {
-      // ignore
+      if (e instanceof HeadTooLargeException) {
+        await this.writeHttpResponse(network, conn, {
+          status: 431, contentType: 'text/plain', body: stringToArrayBuffer('Headers Too Large')
+        });
+      } else if (e instanceof BodyTooLargeException) {
+        await this.writeHttpResponse(network, conn, {
+          status: 413, contentType: 'text/plain', body: stringToArrayBuffer('Payload Too Large')
+        });
+      } else {
+        // Broken connections are routine; anything else is worth a line.
+        console.warn(`LocalSendServer: connection aborted: ${e}`);
+      }
     } finally {
       network.closeConn(conn);
     }
@@ -118,6 +135,9 @@ export class LocalSendServer {
     let rawBytes = new Uint8Array(0);
     let headerEnd = -1;
     while (headerEnd < 0) {
+      if (rawBytes.length > MAX_HEADER_BYTES) {
+        throw new HeadTooLargeException();
+      }
       const result = await network.read(conn, 8192);
       if (result.data.byteLength === 0) {
         break;
@@ -146,125 +166,21 @@ export class LocalSendServer {
       }
     }
 
-    // Large uploads from the official client arrive either with a
     // Content-Length or chunked (Transfer-Encoding: chunked, e.g. reqwest
-    // streams). Both are handled here without quadratic re-copying.
+    // streams). A bogus length can no longer trigger an allocation: the
+    // HttpBodyReader grows only as fast as bytes actually arrive.
     const chunked = (headers['transfer-encoding'] ?? '').toLowerCase().indexOf('chunked') >= 0;
     const contentLength = headers['content-length'] ? parseInt(headers['content-length'], 10) : 0;
     const bodyStart = headerEnd + 4;
-    let body: Uint8Array;
-    if (chunked) {
-      body = await this.readChunkedBody(network, conn, rawBytes, bodyStart);
-    } else {
-      body = new Uint8Array(contentLength);
-      let have = 0;
-      if (rawBytes.length > bodyStart) {
-        have = Math.min(rawBytes.length - bodyStart, contentLength);
-        body.set(rawBytes.subarray(bodyStart, bodyStart + have), 0);
-      }
-      while (have < contentLength) {
-        const result = await network.read(conn, 65536);
-        if (result.data.byteLength === 0) {
-          break;
-        }
-        const chunk = new Uint8Array(result.data);
-        const copy = Math.min(chunk.length, contentLength - have);
-        body.set(chunk.subarray(0, copy), have);
-        have += copy;
-      }
-      if (have < contentLength) {
-        // Sender closed early; keep the bytes that did arrive.
-        body = body.subarray(0, have);
-      }
-    }
-
-    // Avoid a second full copy when the array owns its exact buffer.
-    let buffer: ArrayBuffer;
-    if (body.byteOffset === 0 && body.byteLength === body.buffer.byteLength) {
-      buffer = body.buffer as ArrayBuffer;
-    } else {
-      buffer = body.slice().buffer as ArrayBuffer;
-    }
+    const leftover = rawBytes.length > bodyStart ? rawBytes.subarray(bodyStart) : new Uint8Array(0);
     const req: HttpRequest = {
       method: method,
       path: pathInfo.path,
       query: pathInfo.query,
       headers: headers,
-      body: buffer
+      body: new HttpBodyReader(network, conn, leftover, contentLength, chunked)
     };
     return req;
-  }
-
-  private findCrlf(data: Uint8Array, from: number): number {
-    for (let i = from; i + 1 < data.length; i++) {
-      if (data[i] === 0x0d && data[i + 1] === 0x0a) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  private concatParts(parts: Uint8Array[], total: number): Uint8Array {
-    const out = new Uint8Array(total);
-    let off = 0;
-    for (let i = 0; i < parts.length; i++) {
-      out.set(parts[i], off);
-      off += parts[i].length;
-    }
-    return out;
-  }
-
-  /** Decode a chunked transfer-encoded body, reading more data as needed. */
-  private async readChunkedBody(network: NetworkLayer, conn: number, raw: Uint8Array, start: number): Promise<Uint8Array> {
-    // `pending` holds only unconsumed bytes; consumed data is sliced off so
-    // later appends stay cheap.
-    let pending = raw.length > start ? raw.subarray(start) : new Uint8Array(0);
-    let pos = 0;
-    const parts: Uint8Array[] = [];
-    let total = 0;
-    while (true) {
-      // 1. Read the chunk-size line (hex, optional extensions after ';').
-      let eol = this.findCrlf(pending, pos);
-      while (eol < 0) {
-        const result = await network.read(conn, 65536);
-        if (result.data.byteLength === 0) {
-          return this.concatParts(parts, total);
-        }
-        pending = appendBytes(pending, new Uint8Array(result.data));
-        eol = this.findCrlf(pending, pos);
-      }
-      const sizeLine = utf8Decode(pending.subarray(pos, eol));
-      const chunkSize = parseInt(sizeLine.split(';')[0].trim(), 16);
-      if (isNaN(chunkSize) || chunkSize < 0 || chunkSize > 1073741824) {
-        return this.concatParts(parts, total);
-      }
-      const dataStart = eol + 2;
-      // 2. Wait for the whole data chunk plus its trailing CRLF.
-      while (pending.length < dataStart + chunkSize + 2) {
-        const result = await network.read(conn, 65536);
-        if (result.data.byteLength === 0) {
-          const take = Math.min(Math.max(0, pending.length - dataStart), chunkSize);
-          if (take > 0) {
-            parts.push(pending.subarray(dataStart, dataStart + take));
-            total += take;
-          }
-          return this.concatParts(parts, total);
-        }
-        pending = appendBytes(pending, new Uint8Array(result.data));
-      }
-      // 3. Consume the chunk; keep the tail bytes for the next round.
-      parts.push(pending.subarray(dataStart, dataStart + chunkSize));
-      total += chunkSize;
-      const nextPending = pending.subarray(dataStart + chunkSize + 2);
-      pending = nextPending;
-      pos = 0;
-      if (chunkSize === 0) {
-        // Final chunk: what follows is optional trailers then CRLF; the
-        // connection closes after the response anyway.
-        break;
-      }
-    }
-    return this.concatParts(parts, total);
   }
 
   private parsePath(fullPath: string): PathInfo {
@@ -288,7 +204,7 @@ export class LocalSendServer {
     return result;
   }
 
-  private route(req: HttpRequest, conn: number): HttpResponse {
+  private async route(req: HttpRequest): Promise<HttpResponse> {
     if (req.method === 'GET' && req.path === LocalSendConst.PATH_INFO) {
       return this.jsonResponse(200, this.selfInfo);
     }
@@ -306,8 +222,8 @@ export class LocalSendServer {
     if (req.method === 'POST' && req.path === LocalSendConst.PATH_SEND) {
       return this.handleSend(req);
     }
-    // Official upload route; the extra token query param is not validated
-    // (auto-accept mode).
+    // Official upload route. The body streams straight to disk; the session
+    // and fileId from prepare-upload are validated before anything is written.
     if (req.method === 'POST' && req.path === LocalSendConst.PATH_UPLOAD) {
       return this.handleSend(req);
     }
@@ -317,7 +233,8 @@ export class LocalSendServer {
     // SMS relay routes (Android -> HarmonyOS push). The body is passed raw;
     // SmsServer decodes it as UTF-8.
     if (req.path.startsWith('/api/sms/')) {
-      const r = handleSmsServerRequest(req.method, req.path, req.headers, req.body);
+      const body = await req.body.readFully(MAX_META_BODY); // SMS payloads are small JSON
+      const r = handleSmsServerRequest(req.method, req.path, req.headers, body.slice().buffer as ArrayBuffer);
       if (r !== null) {
         const respBody = stringToArrayBuffer(r.body);
         return { status: r.status, contentType: 'application/json', body: respBody };
@@ -327,11 +244,14 @@ export class LocalSendServer {
   }
 
   /** Accept all files and create a session (auto-accept). */
-  private handleSendRequest(req: HttpRequest): HttpResponse {
+  private async handleSendRequest(req: HttpRequest): Promise<HttpResponse> {
     let sendReq: SendRequest;
     try {
-      sendReq = JSON.parse(arrayBufferToString(req.body)) as SendRequest;
+      sendReq = JSON.parse(utf8Decode(await req.body.readFully(MAX_META_BODY))) as SendRequest;
     } catch (e) {
+      if (e instanceof BodyTooLargeException) {
+        throw e;
+      }
       return { status: 400, contentType: 'text/plain', body: stringToArrayBuffer('Bad Request') };
     }
     const sessionId = generateUUID();
@@ -352,22 +272,21 @@ export class LocalSendServer {
     return this.jsonResponse(200, resp);
   }
 
-  private handleSend(req: HttpRequest): HttpResponse {
+  private async handleSend(req: HttpRequest): Promise<HttpResponse> {
     const sessionId = req.query['sessionId'];
     const fileId = req.query['fileId'];
     if (!sessionId || !fileId) {
       return { status: 400, contentType: 'text/plain', body: stringToArrayBuffer('missing sessionId or fileId') };
     }
-    // fs.writeSync on API 12 accepts ArrayBuffer|string only — pass req.body
-    // directly (wrapping in Uint8Array throws and kills the transfer).
-    // Keep the sender's original filename when available.
-    let fileName = `received_${fileId.substring(0, 8)}`;
+    // The fileId must have been announced via prepare-upload. The old code
+    // fell back to received_<fileId> and wrote anyway — that was an
+    // unauthenticated arbitrary-file-write primitive.
     const pending = this.pendingFileNames.get(fileId);
-    this.pendingFileNames.delete(fileId);
-    if (pending) {
-      fileName = pending;
+    if (!pending) {
+      return { status: 404, contentType: 'text/plain', body: stringToArrayBuffer('unknown fileId') };
     }
-    const safeName = fileName.replace(/[\/\\:*?"<>|]/g, '_');
+    this.pendingFileNames.delete(fileId);
+    const safeName = pending.replace(/[\/\\:*?"<>|]/g, '_');
     const dir = `${this.context.filesDir}/Received`;
     try {
       if (!fs.accessSync(dir)) {
@@ -378,8 +297,10 @@ export class LocalSendServer {
     }
     const savePath = HistoryStore.dedupePath(dir, safeName);
     const file = fs.openSync(savePath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    let written = 0;
     try {
-      fs.writeSync(file.fd, req.body);
+      // Socket -> 256 KB buffer -> disk. Nothing large is held in memory.
+      written = await req.body.copyToFile(file.fd);
     } finally {
       fs.closeSync(file);
     }
@@ -389,7 +310,7 @@ export class LocalSendServer {
       direction: 'receive',
       peer: this.pendingAliases.get(fileId) ?? '未知设备',
       fileName: safeName,
-      size: req.body.byteLength,
+      size: written,
       time: Date.now(),
       path: savePath
     });
@@ -403,7 +324,7 @@ export class LocalSendServer {
   }
 
   private async writeHttpResponse(network: NetworkLayer, conn: number, resp: HttpResponse): Promise<void> {
-    const statusText = resp.status === 200 ? 'OK' : resp.status === 400 ? 'Bad Request' : resp.status === 404 ? 'Not Found' : 'OK';
+    const statusText = statusTextOf(resp.status);
     const header = `HTTP/1.1 ${resp.status} ${statusText}\r\n` +
       `Content-Type: ${resp.contentType}\r\n` +
       `Content-Length: ${resp.body.byteLength}\r\n` +
@@ -419,8 +340,26 @@ function stringToArrayBuffer(str: string): ArrayBuffer {
   return util.TextEncoder.create('utf-8').encodeInto(str).buffer as ArrayBuffer;
 }
 
-function arrayBufferToString(buf: ArrayBuffer): string {
-  return utf8Decode(new Uint8Array(buf));
+function statusTextOf(status: number): string {
+  if (status === 200) {
+    return 'OK';
+  }
+  if (status === 400) {
+    return 'Bad Request';
+  }
+  if (status === 404) {
+    return 'Not Found';
+  }
+  if (status === 413) {
+    return 'Payload Too Large';
+  }
+  if (status === 431) {
+    return 'Headers Too Large';
+  }
+  if (status === 500) {
+    return 'Internal Server Error';
+  }
+  return 'OK';
 }
 
 function utf8Decode(bytes: Uint8Array): string {
