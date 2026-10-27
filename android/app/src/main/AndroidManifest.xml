@@ -4,6 +4,9 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 局域网设备发现：接收 UDP 广播需要组播锁权限 -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -13,6 +16,29 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 后台常驻：申请加入电池优化白名单，防止前台服务被 ROM 冻结 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- 屏幕镜像：mirror-prepare 请求触发开启 Wi-Fi 热点（Shizuku 通路） -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+
+    <!-- Shizuku 包可见性（Android 11+ package visibility） -->
+    <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="moe.shizuku.privileged.sui" />
+        <!-- 应用推流：需要枚举本机可启动应用（Android 11+ 默认不可见） -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <!-- 短信中继：读取/收发短信、识别双卡（READ_PHONE_STATE）、解析联系人姓名 -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
 
     <application
         android:name=".App"
@@ -32,10 +58,11 @@
             </intent-filter>
         </activity>
 
-        <!-- 分享入口：接收系统分享的文件 -->
+        <!-- 分享入口：接收系统分享的文件；纯文本 ACTION_SEND 由 EXTRA_TEXT 落成 .txt -->
         <activity
             android:name=".ShareActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.TsLocalSend.Transparent">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -56,11 +83,50 @@
             </intent-filter>
         </activity>
 
+        <!-- 远程控制 Mac：全屏镜像 + 触控/键盘注入 -->
+        <activity
+            android:name=".remote.RemoteMacActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.TsLocalSend" />
+
         <!-- 后台保活服务：维持 Tailscale 连接和 LocalSend 接收服务 -->
         <service
             android:name=".BridgeService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Shizuku binder 桥：bindUserService 必需 -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <!-- Shizuku UserService：shell UID 进程内反射 TetheringConnector 开热点 -->
+        <service
+            android:name=".MirrorShizukuService"
+            android:exported="true"
+            android:process=":mirror_shizuku" />
+
+        <!-- Shizuku UserService：shell UID 执行 cmd appops，临时放行短信写入 -->
+        <service
+            android:name=".sms.SmsAppOpsShizukuService"
+            android:exported="true"
+            android:process=":sms_appops" />
+
+        <!-- 历史记录：打开已接收/已发送文件 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

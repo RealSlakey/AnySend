@@ -1,0 +1,136 @@
+// ScrcpyStreamManager - C++ 层流管理器
+// 接管 ADB 流的读取，使用独立线程解析 Scrcpy V2 协议并推送至解码器
+#ifndef SCRCPY_STREAM_MANAGER_H
+#define SCRCPY_STREAM_MANAGER_H
+
+#include "adb/core/Adb.h"
+#include "adb/core/AdbChannel.h"
+#include "concurrentqueue/blockingconcurrentqueue.h"
+#include "stream/EncodedPacket.h"
+#include "stream/MediaPacketStore.h"
+#include "stream/StreamIO.h"
+#include "decoder/VideoDecoderNative.h"
+#include "decoder/AudioDecoderNative.h"
+
+#include <cstdint>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <mutex>
+#include <vector>
+#include <deque>
+#include <condition_variable>
+#include <memory>
+
+// 事件回调: type, data (JSON string)
+using StreamEventCallback = std::function<void(const std::string& type, const std::string& data)>;
+
+class ScrcpyStreamManager {
+public:
+    struct Config {
+        int32_t videoStreamId = -1;
+        int32_t audioStreamId = -1;    // -1 if no audio
+        int32_t controlStreamId = -1;
+        std::string surfaceId;
+        // Must match the max_fps value used when launching scrcpy.
+        int32_t videoFrameRate = 60;
+        int32_t audioSampleRate = 48000;
+        int32_t audioChannelCount = 2;
+        bool reverse = false;
+        bool expectVideo = true;
+        bool expectAudio = false;
+        bool expectControl = true;
+        bool sendDummyByte = true;
+    };
+
+    ScrcpyStreamManager();
+    ~ScrcpyStreamManager();
+
+    // startDirect 的失败码（避开 napi 层已占用的 -1 / -3）
+    static constexpr int32_t DIRECT_ERR_BAD_TARGET = -10;
+    static constexpr int32_t DIRECT_ERR_VIDEO = -11;
+    static constexpr int32_t DIRECT_ERR_CONTROL = -12;
+
+    // 启动流处理，adb 必须已连接且 stream 已打开
+    int32_t start(Adb* adb, const Config& config, StreamEventCallback callback);
+    int32_t startReverse(Adb* adb, const Config& config, StreamEventCallback callback);
+    // 直连模式：不经 adb，直接 TCP 连到对端监听的视频/控制端口
+    // （安卓侧 Shizuku 镜像桥把 scrcpy-server 的 abstract socket 暴露成这两个端口）。
+    // 建连顺序视频在前、控制在后，与 scrcpy-server 的 accept 顺序一致。
+    // 成功返回 0，失败返回上面的 DIRECT_ERR_* 之一。
+    // `pin` 非空时，两条连接建立后立刻发送 1 字节长度 + UTF-8 PIN 前缀
+    // （Mac 被控端的鉴权握手），之后再交给收流线程。
+    int32_t startDirect(const std::string& host, uint16_t videoPort, uint16_t controlPort,
+                        const Config& config, StreamEventCallback callback,
+                        const std::string& pin = "");
+
+    // 向控制流发送数据
+    bool sendControl(const uint8_t* data, size_t len);
+
+    int32_t getVideoWidth() const { return videoWidth_.load(); }
+    int32_t getVideoHeight() const { return videoHeight_.load(); }
+
+    // 停止所有线程并释放资源
+    void stop();
+
+    bool isRunning() const { return running_.load(); }
+
+private:
+    // 线程函数
+    void videoThreadFunc();
+    void videoDecodeThreadFunc();
+    void audioThreadFunc();
+    void audioDecodeThreadFunc();
+    void controlThreadFunc();
+    void controlSendThreadFunc();
+    void acceptThreadFunc();
+
+    // 精确读取 N 字节（阻塞），抛出异常表示流关闭或超时
+    std::vector<uint8_t> readExact(IByteStream* source, size_t size, int32_t timeoutMs = -1);
+    void readExactToBuffer(IByteStream* source, uint8_t* dest, size_t size, int32_t timeoutMs = -1);
+    int32_t createTcpListener(uint16_t& port);
+    void closeLocalTunnels();
+    void releaseLocalTunnels();
+    void closeListener();
+    static void closeFd(int& fd);
+    void initPacketPools();
+    void resetPacketPools();
+
+    // 发送事件到 ArkTS
+    void emitEvent(const std::string& type, const std::string& data = "");
+
+    Adb* adb_ = nullptr;
+    Config config_;
+    StreamEventCallback eventCallback_;
+
+    VideoDecoderNative* videoDecoder_ = nullptr;
+    AudioDecoderNative* audioDecoder_ = nullptr;
+    AdbStream* videoStream_ = nullptr;
+    AdbStream* audioStream_ = nullptr;
+    AdbStream* controlStream_ = nullptr;
+    AdbChannel* videoChannel_ = nullptr;
+    AdbChannel* audioChannel_ = nullptr;
+    AdbChannel* controlChannel_ = nullptr;
+
+    int listenFd_ = -1;
+
+    std::thread videoThread_;
+    std::thread videoDecodeThread_;
+    std::thread audioThread_;
+    std::thread audioDecodeThread_;
+    std::thread controlThread_;
+    std::thread acceptThread_;
+    std::thread controlSendThread_;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> videoReaderDone_{false};
+    std::atomic<bool> audioReaderDone_{false};
+    std::atomic<int32_t> videoWidth_{0};
+    std::atomic<int32_t> videoHeight_{0};
+    std::mutex eventMutex_;
+    moodycamel::BlockingConcurrentQueue<std::vector<uint8_t>> controlReliableQueue_;
+    MediaPacketStore<EncodedVideoPacket> videoPackets_;
+    MediaPacketStore<EncodedAudioPacket> audioPackets_;
+};
+
+#endif // SCRCPY_STREAM_MANAGER_H

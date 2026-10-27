@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug-only overlay: export BridgeService so adb can start it without
+     unlocking the screen (used for automated SMS relay verification). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application>
+        <service
+            android:name="com.slakey.anysend.BridgeService"
+            android:exported="true"
+            tools:replace="android:exported"
+            tools:node="merge" />
+    </application>
+</manifest>

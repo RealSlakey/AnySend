@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GO_DIR="${SCRIPT_DIR}/../go"
-OUT_DIR="${SCRIPT_DIR}/android/app/libs"
+OUT_DIR="${SCRIPT_DIR}/../android/app/libs"
 mkdir -p "${OUT_DIR}"
 
 # Use ANDROID_NDK_HOME if set, else try ANDROID_HOME/ndk-bundle

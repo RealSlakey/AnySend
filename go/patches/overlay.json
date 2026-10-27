@@ -1,0 +1,5 @@
+{
+  "Replace": {
+    "/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/cgo_resold.go": "/Volumes/Slakey-Disk/Code/AnySend/AnySend/go/patches/cgo_resold_ohos.go"
+  }
+}

@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.tslsb.app"
+    namespace = "com.slakey.anysend"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.tslsb.app"
+        applicationId = "com.slakey.anysend"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
@@ -33,6 +33,7 @@ android {
 
     buildFeatures {
         viewBinding = true
+        aidl = true
     }
 }
 
@@ -58,6 +59,10 @@ dependencies {
     // Networking & coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.google.code.gson:gson:2.10.1")
+
+    // Shizuku: hotspot control runs in a shell-UID UserService process
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 
     // Tailscale tsnet bridge AAR (built from go/tsnetbridge via gomobile).
     // Optional: if absent, the stub in src/stub/java is used instead.

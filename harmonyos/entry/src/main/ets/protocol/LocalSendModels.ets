@@ -1,7 +1,22 @@
 // LocalSend v2 protocol data models for HarmonyOS (ArkTS).
 // Field names MUST match protocol/README.md and the Android implementation.
 
-export const LocalSendConst = {
+interface LocalSendConstType {
+  PORT: number;
+  PROTOCOL_VERSION: string;
+  PATH_INFO: string;
+  PATH_REGISTER: string;
+  PATH_SEND_REQUEST: string;
+  PATH_SEND: string;
+  PATH_CANCEL: string;
+  // Official LocalSend v2 route names (prepare-upload/upload). The legacy
+  // send-request/send paths above stay for AnySend-to-AnySend transfers.
+  PATH_PREPARE_UPLOAD: string;
+  PATH_UPLOAD: string;
+  DEVICE_TYPE_MOBILE: string;
+}
+
+export const LocalSendConst: LocalSendConstType = {
   PORT: 53317,
   PROTOCOL_VERSION: '2.0',
   PATH_INFO: '/api/localsend/v2/info',
@@ -9,6 +24,8 @@ export const LocalSendConst = {
   PATH_SEND_REQUEST: '/api/localsend/v2/send-request',
   PATH_SEND: '/api/localsend/v2/send',
   PATH_CANCEL: '/api/localsend/v2/cancel',
+  PATH_PREPARE_UPLOAD: '/api/localsend/v2/prepare-upload',
+  PATH_UPLOAD: '/api/localsend/v2/upload',
   DEVICE_TYPE_MOBILE: 'mobile'
 };
 
@@ -68,5 +85,9 @@ export function guessMime(fileName: string): string {
   if (lower.endsWith('.mp3')) return 'audio/mpeg';
   if (lower.endsWith('.pdf')) return 'application/pdf';
   if (lower.endsWith('.zip')) return 'application/zip';
+  // Text payloads must be advertised as text/plain so peers open them as text.
+  if (lower.endsWith('.txt') || lower.endsWith('.log')) return 'text/plain';
+  if (lower.endsWith('.md')) return 'text/markdown';
+  if (lower.endsWith('.json')) return 'text/plain';
   return 'application/octet-stream';
 }

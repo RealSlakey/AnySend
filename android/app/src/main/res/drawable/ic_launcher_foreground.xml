@@ -1,14 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Send glyph (Lucide "send-horizontal", ISC licence), scaled into the
+     66dp adaptive-icon safe zone and centred on the 108dp canvas. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,30 L54,78 M30,54 L78,54"
-        android:strokeWidth="8"
-        android:strokeColor="#FFFFFF"/>
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M40,40 L68,40 L68,68 L40,68 Z"/>
+    <group
+        android:scaleX="2.2047"
+        android:scaleY="2.2047"
+        android:translateX="26.432"
+        android:translateY="27.543">
+        <path
+            android:pathData="M3.714,3.048a.498,.498 0 0 0 -.683,.627l2.843,7.627a2,2 0 0 1 0,1.396l-2.842,7.627a.498,.498 0 0 0 .682,.627l18,-8.5a.5,.5 0 0 0 0,-.904z"
+            android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M6,12h16"
+            android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
 </vector>

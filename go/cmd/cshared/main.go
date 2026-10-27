@@ -32,6 +32,30 @@ func Start(authKey *C.char, stateDir *C.char, hostname *C.char) C.int {
 	return C.int(tsnetbridge.Start(C.GoString(authKey), C.GoString(stateDir), C.GoString(hostname)))
 }
 
+//export StartAsync
+func StartAsync(authKey *C.char, stateDir *C.char, hostname *C.char) C.int {
+	return C.int(tsnetbridge.StartAsync(C.GoString(authKey), C.GoString(stateDir), C.GoString(hostname)))
+}
+
+//export StartState
+func StartState() *C.char {
+	return cStrCopy(tsnetbridge.StartState())
+}
+
+//export SetInterfaces
+func SetInterfaces(specsJSON *C.char) C.int {
+	return C.int(tsnetbridge.SetInterfaces(C.GoString(specsJSON)))
+}
+
+// LastError returns the message from the most recent failed Start, or "".
+// The host app surfaces this to the UI/logs because the sandboxed state
+// directory where bridge-error.txt is written is not readable over adb/hdc.
+//
+//export LastError
+func LastError() *C.char {
+	return cStrCopy(tsnetbridge.LastError())
+}
+
 //export GetSelfInfo
 func GetSelfInfo() *C.char {
 	return cStrCopy(tsnetbridge.GetSelfInfo())
@@ -53,12 +77,39 @@ func Listen(network *C.char, addr *C.char) *C.char {
 }
 
 //export Accept
-func Accept(handle C.int64_t) *C.char {
+func Accept(handle C.longlong) *C.char {
 	return cStrCopy(tsnetbridge.Accept(int64(handle)))
 }
 
+// AcceptStart launches a background Accept and returns immediately.
+//
+//export AcceptStart
+func AcceptStart(handle C.longlong) C.int {
+	return C.int(tsnetbridge.AcceptStart(int64(handle)))
+}
+
+// AcceptPoll pops one accepted connection: {"handle":N|0} or {"error":"..."}.
+//
+//export AcceptPoll
+func AcceptPoll(handle C.longlong) *C.char {
+	return cStrCopy(tsnetbridge.AcceptPoll(int64(handle)))
+}
+
+// ForwardTCP exposes target ("host:port") on 127.0.0.1 through Tailscale.
+// Returns {"handle":N,"port":P} or {"error":"..."}.
+//
+//export ForwardTCP
+func ForwardTCP(localPort C.int, target *C.char) *C.char {
+	return cStrCopy(tsnetbridge.ForwardTCP(int(localPort), C.GoString(target)))
+}
+
+//export CloseForward
+func CloseForward(handle C.longlong) C.int {
+	return C.int(tsnetbridge.CloseForward(int64(handle)))
+}
+
 //export Read
-func Read(handle C.int64_t, maxLen C.int) *C.char {
+func Read(handle C.longlong, maxLen C.int) *C.char {
 	// Returns JSON: {"data":"<base64>","err":"<msg>"}
 	data, err := tsnetbridge.Read(int64(handle), int(maxLen))
 	errStr := ""
@@ -74,7 +125,7 @@ func Read(handle C.int64_t, maxLen C.int) *C.char {
 }
 
 //export Write
-func Write(handle C.int64_t, data *C.char, len C.int) C.int {
+func Write(handle C.longlong, data *C.char, len C.int) C.int {
 	goData := C.GoBytes(unsafe.Pointer(data), len)
 	n, err := tsnetbridge.Write(int64(handle), goData)
 	if err != nil {
@@ -84,12 +135,12 @@ func Write(handle C.int64_t, data *C.char, len C.int) C.int {
 }
 
 //export CloseConn
-func CloseConn(handle C.int64_t) C.int {
+func CloseConn(handle C.longlong) C.int {
 	return C.int(tsnetbridge.CloseConn(int64(handle)))
 }
 
 //export CloseListener
-func CloseListener(handle C.int64_t) C.int {
+func CloseListener(handle C.longlong) C.int {
 	return C.int(tsnetbridge.CloseListener(int64(handle)))
 }
 

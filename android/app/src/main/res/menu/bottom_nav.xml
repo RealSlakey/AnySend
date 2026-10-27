@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/nav_transfer"
+        android:icon="@drawable/ic_nav_send"
+        android:title="传输" />
+    <item
+        android:id="@+id/nav_devices"
+        android:icon="@drawable/ic_nav_devices"
+        android:title="设备" />
+    <item
+        android:id="@+id/nav_history"
+        android:icon="@drawable/ic_nav_history"
+        android:title="历史" />
+    <item
+        android:id="@+id/nav_settings"
+        android:icon="@drawable/ic_nav_tune"
+        android:title="设置" />
+</menu>

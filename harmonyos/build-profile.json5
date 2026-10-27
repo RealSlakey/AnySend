@@ -5,7 +5,23 @@
         "name": "default",
         "signingConfig": "default",
         "compatibleSdkVersion": "5.0.0(12)",
-        "runtimeOS": "HarmonyOS"
+        "runtimeOS": "HarmonyOS",
+        "targetSdkVersion": "26.0.0"
+      }
+    ],
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "/Users/slakey/.ohos/config/default_harmonyos_JavncfnexnfgNncjVP9s0kEVTRn58jejQHiy9aX_zLc=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001B4EB085EF291868D3F15BDD7C7FFDF68EB8103F7C6B79B2B8686A831D5329B72EBD3EE8AB7EC11C",
+          "profile": "/Users/slakey/.ohos/config/default_harmonyos_JavncfnexnfgNncjVP9s0kEVTRn58jejQHiy9aX_zLc=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/Users/slakey/.ohos/config/default_harmonyos_JavncfnexnfgNncjVP9s0kEVTRn58jejQHiy9aX_zLc=.p12",
+          "storePassword": "0000001BF2C5B535A473EC51F2B946F40016CC01416A9B0686F0B3EBE2D6E704E9ECD89EDEC000E46A044B"
+        }
       }
     ]
   },
@@ -16,7 +32,9 @@
       "targets": [
         {
           "name": "default",
-          "applyToProducts": ["default"]
+          "applyToProducts": [
+            "default"
+          ]
         }
       ]
     }

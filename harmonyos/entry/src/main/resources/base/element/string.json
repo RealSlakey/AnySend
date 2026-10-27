@@ -1,9 +1,14 @@
 {
   "string": [
-    { "name": "app_name", "value": "TS LocalSend" },
-    { "name": "module_desc", "value": "TS LocalSend 主模块" },
+    { "name": "app_name", "value": "AnySend" },
+    { "name": "module_desc", "value": "AnySend 主模块" },
     { "name": "entry_ability_desc", "value": "主界面" },
     { "name": "share_ability_desc", "value": "分享入口" },
-    { "name": "share_ext_desc", "value": "系统分享扩展" }
+    { "name": "share_ext_desc", "value": "系统分享扩展" },
+    { "name": "perm_read_media", "value": "用于选择并发送相册中的文件" },
+    { "name": "perm_write_media", "value": "用于将接收到的文件保存到相册" },
+    { "name": "perm_background_running", "value": "用于在后台持续接收其他设备发来的文件" },
+    { "name": "perm_location", "value": "用于保持后台常驻连接，持续接收文件与短信" },
+    { "name": "perm_wifi_info", "value": "用于自动加入安卓设备热点以建立屏幕镜像连接" }
   ]
 }

@@ -1,4 +1,5 @@
 {
+  "modelVersion": "5.0.0",
   "name": "tslsb",
   "version": "1.0.0",
   "description": "Tailscale + LocalSend cross-platform file transfer",

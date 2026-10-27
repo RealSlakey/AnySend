@@ -6,6 +6,12 @@
 // promise-based. The Tailscale implementation resolves immediately since
 // its native calls are blocking.
 
+/** Result of a read(): received bytes plus an error string ('' when fine). */
+export interface ReadResult {
+  data: ArrayBuffer;
+  err: string;
+}
+
 export interface NetworkLayer {
   /** Open a TCP connection to addr (host:port). Resolves to handle (>0) or -1. */
   dial(network: string, addr: string): Promise<number>;
@@ -16,8 +22,8 @@ export interface NetworkLayer {
   /** Accept one connection. Resolves to connection handle (>0) or -1. */
   accept(listenerHandle: number): Promise<number>;
 
-  /** Read up to maxLen bytes. Resolves to { data, err }. */
-  read(handle: number, maxLen: number): Promise<{ data: ArrayBuffer; err: string }>;
+  /** Read up to maxLen bytes. Resolves to a ReadResult. */
+  read(handle: number, maxLen: number): Promise<ReadResult>;
 
   /** Write data. Resolves to bytes written or -1. */
   write(handle: number, data: ArrayBuffer): Promise<number>;

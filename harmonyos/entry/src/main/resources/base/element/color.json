@@ -1,5 +1,11 @@
 {
   "color": [
-    { "name": "start_window_background", "value": "#FFFFFF" }
+    { "name": "start_window_background", "value": "#FFFFFF" },
+    { "name": "page_bg", "value": "#F1F3F5" },
+    { "name": "card", "value": "#FFFFFF" },
+    { "name": "field", "value": "#F1F3F5" },
+    { "name": "chip_bg", "value": "#140A59F1" },
+    { "name": "success", "value": "#00B34A" },
+    { "name": "danger", "value": "#E84026" }
   ]
 }

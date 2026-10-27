@@ -2,7 +2,10 @@ module github.com/tslsb/tsnet-bridge
 
 go 1.26.0
 
-require tailscale.com v1.70.0
+require (
+	golang.org/x/sys v0.49.0
+	tailscale.com v1.70.0
+)
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
@@ -77,7 +80,6 @@ require (
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.5.0 // indirect

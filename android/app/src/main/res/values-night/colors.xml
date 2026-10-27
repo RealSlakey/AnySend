@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark palette for AnySend brand (#0A59F1 seed) -->
+    <color name="brand_primary">#FFADC2FF</color>
+    <color name="brand_on_primary">#FF002D6F</color>
+    <color name="brand_primary_container">#FF00449E</color>
+    <color name="brand_on_primary_container">#FFD8E2FF</color>
+
+    <color name="surface_page">#FF111318</color>
+    <color name="surface_card">#FF1D2026</color>
+    <color name="surface_variant">#FF43474E</color>
+    <color name="on_surface">#FFE2E2E9</color>
+    <color name="on_surface_variant">#FFC4C6CF</color>
+    <color name="outline_grey">#FF8D9199</color>
+</resources>

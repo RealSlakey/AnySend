@@ -1,8 +1,9 @@
 // NetworkLayer backed by the embedded Tailscale tsnet userspace netstack.
-// TailscaleManager's native calls are blocking, so we wrap them in
-// Promise.resolve to match the async NetworkLayer interface.
+// All native calls run on the dedicated worker thread (see TsnapiWorker):
+// a cgo call from the UI thread can stall the Go runtime and trip the 6 s
+// main-thread watchdog, so every call here is async via TsnapiClient.
 
-import { NetworkLayer } from './NetworkLayer';
+import { NetworkLayer, ReadResult } from './NetworkLayer';
 import { TailscaleManager } from '../bridge/TailscaleManager';
 
 export class TailscaleNetworkLayer implements NetworkLayer {
@@ -18,7 +19,7 @@ export class TailscaleNetworkLayer implements NetworkLayer {
     return TailscaleManager.accept(listenerHandle);
   }
 
-  async read(handle: number, maxLen: number): Promise<{ data: ArrayBuffer; err: string }> {
+  async read(handle: number, maxLen: number): Promise<ReadResult> {
     return TailscaleManager.read(handle, maxLen);
   }
 

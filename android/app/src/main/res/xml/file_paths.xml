@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Received files land in public Downloads/AnySend -->
+    <external-path
+        name="downloads_anysend"
+        path="Download/AnySend" />
+    <!-- Sent files live in the app cache until shared -->
+    <cache-path
+        name="cache"
+        path="." />
+    <files-path
+        name="files"
+        path="." />
+</paths>

@@ -13,6 +13,8 @@ import {
   guessMime
 } from './LocalSendModels';
 import { fileIo as fs } from '@kit.CoreFileKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import util from '@ohos.util';
 
 interface HttpResponse {
   status: number;
@@ -68,20 +70,22 @@ export class LocalSendSender {
   }
 
   private async readHttpResponse(conn: number): Promise<HttpResponse> {
-    let rawStr = '';
+    // Byte-level buffering: the body must never pass through string
+    // conversion (UTF-8 text and binary payloads would both corrupt).
+    let rawBytes = new Uint8Array(0);
     let headerEnd = -1;
     while (headerEnd < 0) {
       const result = await this.network.read(conn, 8192);
       if (result.data.byteLength === 0) {
         break;
       }
-      rawStr += arrayBufferToString(result.data);
-      headerEnd = rawStr.indexOf('\r\n\r\n');
+      rawBytes = appendBytes(rawBytes, new Uint8Array(result.data));
+      headerEnd = findHeaderEnd(rawBytes);
     }
     if (headerEnd < 0) {
       return { status: 0, headers: {}, body: new ArrayBuffer(0) };
     }
-    const headerSection = rawStr.substring(0, headerEnd);
+    const headerSection = utf8Decode(rawBytes.subarray(0, headerEnd));
     const lines = headerSection.split('\r\n');
     const statusParts = lines[0].split(' ');
     const status = statusParts.length >= 2 ? parseInt(statusParts[1], 10) : 0;
@@ -97,28 +101,17 @@ export class LocalSendSender {
     }
 
     const contentLength = headers['content-length'] ? parseInt(headers['content-length'], 10) : 0;
-    let bodyBytes = new Uint8Array(0);
-    const already = rawStr.length - (headerEnd + 4);
-    if (already > 0 && contentLength > 0) {
-      const toCopy = Math.min(already, contentLength);
-      bodyBytes = new Uint8Array(toCopy);
-      const bodyStart = rawStr.substring(headerEnd + 4, headerEnd + 4 + toCopy);
-      for (let i = 0; i < toCopy; i++) {
-        bodyBytes[i] = bodyStart.charCodeAt(i);
-      }
-    }
-    while (bodyBytes.length < contentLength) {
+    const bodyStart = headerEnd + 4;
+    let body = rawBytes.length > bodyStart ? rawBytes.subarray(bodyStart) : new Uint8Array(0);
+    while (body.length < contentLength) {
       const result = await this.network.read(conn, 8192);
       if (result.data.byteLength === 0) {
         break;
       }
-      const chunk = new Uint8Array(result.data);
-      const combined = new Uint8Array(bodyBytes.length + chunk.length);
-      combined.set(bodyBytes, 0);
-      combined.set(chunk, bodyBytes.length);
-      bodyBytes = combined;
+      body = appendBytes(body, new Uint8Array(result.data));
     }
-    return { status, headers, body: bodyBytes.buffer };
+    const finalBytes = contentLength > 0 && body.length > contentLength ? body.subarray(0, contentLength) : body;
+    return { status: status, headers: headers, body: finalBytes.slice().buffer as ArrayBuffer };
   }
 
   /** Step 1: register. Returns receiver's DeviceInfo or null. */
@@ -179,12 +172,14 @@ export class LocalSendSender {
       const total = getFileSize(filePath);
       const fileName = extractFileName(filePath);
       const mime = guessMime(fileName);
+      // Text uploads carry their charset; the metadata fileType stays text/plain.
+      const contentType = mime.startsWith('text/') ? `${mime}; charset=utf-8` : mime;
       const path = `${LocalSendConst.PATH_SEND}?sessionId=${sessionId}&fileId=${fileId}`;
       const headerLines: string[] = [
         `POST ${path} HTTP/1.1`,
         `Host: ${this.receiverIp}:${LocalSendConst.PORT}`,
         'Connection: close',
-        `Content-Type: ${mime}`,
+        `Content-Type: ${contentType}`,
         `Content-Length: ${total}`,
         ''
       ];
@@ -192,20 +187,32 @@ export class LocalSendSender {
       await this.network.write(conn, stringToArrayBuffer(headerStr));
 
       // Open the file (works with both file paths and content:// URIs)
-      const file = fs.openSync(filePath, fs.OpenMode.READ_ONLY);
+      let file: fs.File;
+      try {
+        file = fs.openSync(filePath, fs.OpenMode.READ_ONLY);
+      } catch (e) {
+        const err = e as BusinessError;
+        console.error(`ANYSEND open failed (send) uri=${filePath} code=${err.code} msg=${err.message}`);
+        return false;
+      }
       const buf = new ArrayBuffer(64 * 1024);
       let sent = 0;
       let n = 0;
       try {
-        do {
-          n = fs.readSync(file.fd, buf, { offset: 0, length: buf.byteLength });
-          if (n > 0) {
-            const chunk = buf.slice(0, n);
-            await this.network.write(conn, chunk);
-            sent += n;
-            progress(sent, total);
+        // ReadOptions.offset is the absolute position inside the file, so it has
+        // to advance; leaving it at 0 re-reads the head forever and the upload
+        // never ends (the receiver then gets a truncated, unopenable file).
+        while (sent < total) {
+          const want = Math.min(buf.byteLength, total - sent);
+          n = fs.readSync(file.fd, buf, { offset: sent, length: want });
+          if (n <= 0) {
+            break;
           }
-        } while (n > 0);
+          const chunk = buf.slice(0, n);
+          await this.network.write(conn, chunk);
+          sent += n;
+          progress(sent, total);
+        }
       } finally {
         fs.closeSync(file);
       }
@@ -222,7 +229,13 @@ export class LocalSendSender {
 function extractFileName(pathOrUri: string): string {
   const clean = pathOrUri.split('?')[0];
   const idx = clean.lastIndexOf('/');
-  return idx >= 0 ? clean.substring(idx + 1) : clean;
+  const raw = idx >= 0 ? clean.substring(idx + 1) : clean;
+  // Share Kit hands over percent-encoded URIs; the receiver needs the real name.
+  try {
+    return decodeURIComponent(raw);
+  } catch (e) {
+    return raw;
+  }
 }
 
 /** Get file size. Handles both file paths and content:// URIs. */
@@ -230,31 +243,45 @@ function getFileSize(pathOrUri: string): number {
   try {
     const file = fs.openSync(pathOrUri, fs.OpenMode.READ_ONLY);
     try {
-      const stat = fs.fstatSync(file.fd);
+      const stat = fs.statSync(file.fd);
       return stat.size;
     } finally {
       fs.closeSync(file);
     }
   } catch (e) {
+    const err = e as BusinessError;
+    console.error(`ANYSEND open failed (size) uri=${pathOrUri} code=${err.code} msg=${err.message}`);
     return 0;
   }
 }
 
 function stringToArrayBuffer(str: string): ArrayBuffer {
-  const bytes = new Uint8Array(str.length);
-  for (let i = 0; i < str.length; i++) {
-    bytes[i] = str.charCodeAt(i);
-  }
-  return bytes.buffer;
+  return util.TextEncoder.create('utf-8').encodeInto(str).buffer as ArrayBuffer;
 }
 
 function arrayBufferToString(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let str = '';
-  for (let i = 0; i < bytes.length; i++) {
-    str += String.fromCharCode(bytes[i]);
+  return utf8Decode(new Uint8Array(buf));
+}
+
+function utf8Decode(bytes: Uint8Array): string {
+  return util.TextDecoder.create('utf-8').decodeToString(bytes);
+}
+
+function appendBytes(dst: Uint8Array, src: Uint8Array): Uint8Array {
+  const combined = new Uint8Array(dst.length + src.length);
+  combined.set(dst, 0);
+  combined.set(src, dst.length);
+  return combined;
+}
+
+/** Find the '\r\n\r\n' header/body separator. Returns -1 when absent. */
+function findHeaderEnd(bytes: Uint8Array): number {
+  for (let i = 0; i + 3 < bytes.length; i++) {
+    if (bytes[i] === 13 && bytes[i + 1] === 10 && bytes[i + 2] === 13 && bytes[i + 3] === 10) {
+      return i;
+    }
   }
-  return str;
+  return -1;
 }
 
 function generateUUID(): string {
