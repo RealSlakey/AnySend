@@ -33,6 +33,12 @@ class LocalSendServer(
     private companion object {
         /** Vendored scrcpy-server jar shipped in the APK assets. */
         const val MIRROR_SERVER_ASSET = "scrcpy-server-v3.3.4"
+
+        /** Hard cap on the request head (request line + headers). */
+        const val MAX_HEADER_BYTES = 64 * 1024
+
+        /** Cap for JSON bodies (send-request metadata, SMS payloads, ...). */
+        const val MAX_META_BODY = 8 * 1024 * 1024
     }
 
     private val gson = Gson()
@@ -107,30 +113,42 @@ class LocalSendServer(
 
     private suspend fun handleConnection(net: NetworkLayer, conn: Long) {
         try {
-            val request = readHttpRequest(net, conn) ?: return
-            val response = routeOrSms(request, conn)
+            val request = readRequest(net, conn) ?: return
+            val response = routeOrSms(request)
             writeHttpResponse(net, conn, response)
+        } catch (e: HeadTooLargeException) {
+            runCatching { writeHttpResponse(net, conn, HttpResponse(431, "text/plain", "Headers Too Large".toByteArray())) }
+        } catch (e: BodyTooLargeException) {
+            runCatching { writeHttpResponse(net, conn, HttpResponse(413, "text/plain", "Payload Too Large".toByteArray())) }
         } catch (e: Exception) {
-            // ignore broken connections
+            // Broken connections are routine; anything else is worth a line.
+            android.util.Log.w("LocalSendServer", "connection aborted: ${e.javaClass.simpleName}: ${e.message}")
         } finally {
             net.closeConn(conn)
         }
     }
 
-    private data class HttpRequest(
+    /** Request head + an incremental body reader (never buffers the payload). */
+    private class HttpRequest(
         val method: String,
         val path: String,
         val query: Map<String, String>,
         val headers: Map<String, String>,
-        val body: ByteArray
+        val body: HttpBodyReader
     )
 
-    private suspend fun readHttpRequest(net: NetworkLayer, conn: Long): HttpRequest? {
-        // Byte-level buffering: the body must never pass through String
-        // conversion (UTF-8 JSON and binary uploads would both corrupt).
+    private class HeadTooLargeException : Exception("request head exceeds limit")
+
+    /**
+     * Reads and parses the request head with a hard size cap, then wraps
+     * whatever body bytes already arrived in a [HttpBodyReader]. The body is
+     * never fully materialised — uploads stream straight to disk.
+     */
+    private suspend fun readRequest(net: NetworkLayer, conn: Long): HttpRequest? {
         var rawBytes = ByteArray(0)
         var headerEnd = -1
         while (headerEnd < 0) {
+            if (rawBytes.size > MAX_HEADER_BYTES) throw HeadTooLargeException()
             val n = net.read(conn, 8192) ?: break
             if (n.isEmpty()) break
             rawBytes = appendBytes(rawBytes, n)
@@ -155,102 +173,17 @@ class LocalSendServer(
             }
         }
 
-        // Large uploads from the official client arrive either with a
         // Content-Length or chunked (Transfer-Encoding: chunked, e.g. reqwest
-        // streams). Both are handled here without quadratic re-copying.
+        // streams). A bogus length can no longer trigger an allocation: the
+        // HttpBodyReader grows only as fast as bytes actually arrive.
         val chunked = (headers["transfer-encoding"] ?: "").lowercase().contains("chunked")
-        val contentLength = headers["content-length"]?.toIntOrNull() ?: 0
-        val bodyStart = headerEnd + 4
-        val finalBody: ByteArray = if (chunked) {
-            readChunkedBody(net, conn, rawBytes, bodyStart)
+        val contentLength = headers["content-length"]?.toLongOrNull() ?: 0L
+        val leftover = if (rawBytes.size > headerEnd + 4) {
+            rawBytes.copyOfRange(headerEnd + 4, rawBytes.size)
         } else {
-            val body = ByteArray(contentLength)
-            var have = 0
-            if (rawBytes.size > bodyStart) {
-                have = minOf(rawBytes.size - bodyStart, contentLength)
-                System.arraycopy(rawBytes, bodyStart, body, 0, have)
-            }
-            while (have < contentLength) {
-                val n = net.read(conn, 65536) ?: break
-                if (n.isEmpty()) break
-                val copy = minOf(n.size, contentLength - have)
-                System.arraycopy(n, 0, body, have, copy)
-                have += copy
-            }
-            if (have == contentLength) body else body.copyOf(have)
+            ByteArray(0)
         }
-
-        return HttpRequest(method, path, query, headers, finalBody)
-    }
-
-    private fun findCrlf(data: ByteArray, from: Int): Int {
-        var i = from
-        while (i + 1 < data.size) {
-            if (data[i] == 0x0d.toByte() && data[i + 1] == 0x0a.toByte()) return i
-            i++
-        }
-        return -1
-    }
-
-    private fun concatParts(parts: List<ByteArray>, total: Int): ByteArray {
-        val out = ByteArray(total)
-        var off = 0
-        for (p in parts) {
-            System.arraycopy(p, 0, out, off, p.size)
-            off += p.size
-        }
-        return out
-    }
-
-    /** Decode a chunked transfer-encoded body, reading more data as needed. */
-    private suspend fun readChunkedBody(net: NetworkLayer, conn: Long, raw: ByteArray, start: Int): ByteArray {
-        // `pending` holds only unconsumed bytes; consumed data is sliced off
-        // so later appends stay cheap.
-        var pending = if (raw.size > start) raw.copyOfRange(start, raw.size) else ByteArray(0)
-        var pos = 0
-        val parts = ArrayList<ByteArray>()
-        var total = 0
-        while (true) {
-            // 1. Read the chunk-size line (hex, optional extensions after ';').
-            var eol = findCrlf(pending, pos)
-            while (eol < 0) {
-                val n = net.read(conn, 65536) ?: return concatParts(parts, total)
-                if (n.isEmpty()) return concatParts(parts, total)
-                pending = appendBytes(pending, n)
-                eol = findCrlf(pending, pos)
-            }
-            val sizeLine = String(pending, pos, eol - pos, Charsets.UTF_8)
-            val chunkSize = sizeLine.substringBefore(';').trim().toIntOrNull(16)
-                ?: return concatParts(parts, total)
-            if (chunkSize < 0 || chunkSize > 1 shl 30) {
-                return concatParts(parts, total)
-            }
-            val dataStart = eol + 2
-            // 2. Wait for the whole data chunk plus its trailing CRLF.
-            while (pending.size < dataStart + chunkSize + 2) {
-                val n = net.read(conn, 65536)
-                if (n == null || n.isEmpty()) {
-                    val take = minOf(maxOf(0, pending.size - dataStart), chunkSize)
-                    if (take > 0) {
-                        parts.add(pending.copyOfRange(dataStart, dataStart + take))
-                        total += take
-                    }
-                    return concatParts(parts, total)
-                }
-                pending = appendBytes(pending, n)
-            }
-            // 3. Consume the chunk; keep the tail bytes for the next round.
-            parts.add(pending.copyOfRange(dataStart, dataStart + chunkSize))
-            total += chunkSize
-            pending = pending.copyOfRange(dataStart + chunkSize + 2, pending.size)
-            pos = 0
-            if (chunkSize == 0) {
-                // Final chunk: optional trailers then CRLF; the connection
-                // closes after the response anyway.
-                break
-            }
-        }
-        return concatParts(parts, total)
+        return HttpRequest(method, path, query, headers, HttpBodyReader(net, conn, leftover, contentLength, chunked))
     }
 
     private fun parsePath(fullPath: String): Pair<String, Map<String, String>> {
@@ -270,10 +203,11 @@ class LocalSendServer(
     }
 
     /** SMS relay routes take precedence when configured. */
-    private suspend fun routeOrSms(req: HttpRequest, conn: Long): HttpResponse {
+    private suspend fun routeOrSms(req: HttpRequest): HttpResponse {
         if (req.path.startsWith("/api/sms/")) {
             val relay = smsRelay ?: return HttpResponse(404, "text/plain", "SMS relay disabled".toByteArray())
-            val r = relay.handle(req.method, req.path, req.query, req.headers, req.body)
+            val body = req.body.readFully(MAX_META_BODY) // SMS payloads are small JSON
+            val r = relay.handle(req.method, req.path, req.query, req.headers, body)
             if (r != null) {
                 return HttpResponse(
                     r.status, "application/json",
@@ -283,10 +217,10 @@ class LocalSendServer(
                 )
             }
         }
-        return route(req, conn)
+        return route(req)
     }
 
-    private fun route(req: HttpRequest, conn: Long): HttpResponse {
+    private suspend fun route(req: HttpRequest): HttpResponse {
         return when {
             req.method == "GET" && req.path == LocalSendConst.PATH_INFO ->
                 HttpResponse(200, "application/json", gson.toJson(selfInfo).toByteArray())
@@ -307,13 +241,14 @@ class LocalSendServer(
             }
 
             req.method == "POST" && req.path == LocalSendConst.PATH_SEND -> {
-                handleSend(req, conn)
+                handleSend(req)
             }
 
-            // Official upload route; token query param is not validated
-            // (auto-accept mode).
+            // Official upload route. The body streams straight to disk; the
+            // per-file token from prepare-upload is validated first (v2 wire
+            // format keeps ?token= in the URL).
             req.method == "POST" && req.path == LocalSendConst.PATH_UPLOAD -> {
-                handleSend(req, conn)
+                handleSend(req)
             }
 
             req.method == "POST" && req.path == LocalSendConst.PATH_CANCEL -> {
@@ -598,10 +533,11 @@ class LocalSendServer(
     }
 
     /** Accept all files and create a session (auto-accept). */
-    private fun handleSendRequest(req: HttpRequest): HttpResponse {
+    private suspend fun handleSendRequest(req: HttpRequest): HttpResponse {
         val sendReq = try {
-            gson.fromJson(String(req.body), SendRequest::class.java)
+            gson.fromJson(String(req.body.readFully(MAX_META_BODY)), SendRequest::class.java)
         } catch (e: Exception) {
+            if (e is BodyTooLargeException) throw e
             return HttpResponse(400, "text/plain", "Bad Request".toByteArray())
         }
         val sessionId = UUID.randomUUID().toString()
@@ -620,40 +556,55 @@ class LocalSendServer(
         return HttpResponse(200, "application/json", gson.toJson(resp).toByteArray())
     }
 
-    private fun handleSend(req: HttpRequest, conn: Long): HttpResponse {
+    private suspend fun handleSend(req: HttpRequest): HttpResponse {
         val sessionId = req.query["sessionId"] ?: return HttpResponse(400, "text/plain", "missing sessionId".toByteArray())
         val fileId = req.query["fileId"] ?: return HttpResponse(400, "text/plain", "missing fileId".toByteArray())
         val session = synchronized(pendingSessions) { pendingSessions[sessionId] }
-        val meta = session?.files?.get(fileId)
+            ?: return HttpResponse(404, "text/plain", "unknown session".toByteArray())
+        val meta = session.files[fileId]
+            ?: return HttpResponse(404, "text/plain", "unknown fileId".toByteArray())
         // Keep the sender's original filename; fall back to a safe stub.
-        val rawName = meta?.fileName ?: "received_${fileId.take(8)}"
-        val safeName = rawName.replace(Regex("[\\\\/:*?\"<>|\u0000]"), "_").ifBlank { "file.bin" }
-        val savedPath: String = try {
-            saveReceivedFile(safeName, req.body)
+        val safeName = meta.fileName.replace(Regex("[\\\\/:*?\"<>|\u0000]"), "_").ifBlank { "file.bin" }
+        // Open the destination before consuming the body so nothing large is
+        // ever held in memory: bytes flow socket -> 256 KB buffer -> disk.
+        val target = try {
+            openReceiveTarget(safeName)
         } catch (e: Exception) {
             return HttpResponse(500, "text/plain", "save failed".toByteArray())
+        }
+        val written: Long = try {
+            target.output.use { req.body.copyTo(it) { } }
+        } catch (e: Exception) {
+            target.cleanup()
+            throw e
         }
         // Record in transfer history (receive direction).
         TransferHistory.add(
             context, "receive",
-            session?.senderAlias ?: "未知设备",
-            safeName, req.body.size.toLong(), savedPath
+            session.senderAlias,
+            safeName, written, target.path
         )
-        if (session != null) {
-            session.received.incrementAndGet()
-            if (session.received.get() >= session.files.size) {
-                synchronized(pendingSessions) { pendingSessions.remove(sessionId) }
-            }
+        session.received.incrementAndGet()
+        if (session.received.get() >= session.files.size) {
+            synchronized(pendingSessions) { pendingSessions.remove(sessionId) }
         }
         return HttpResponse(200, "application/json", "{}".toByteArray())
     }
 
+    /** A destination for one streamed upload. */
+    private class ReceiveTarget(
+        val output: java.io.OutputStream,
+        val path: String,
+        /** Best-effort removal of the partial file (transfer failed mid-way). */
+        val cleanup: () -> Unit
+    )
+
     /**
-     * Persist an uploaded file under Downloads/AnySend with its original name.
+     * Open (not write) the destination for [fileName] under Downloads/AnySend.
      * Raw path first; on scoped-storage failure fall back to MediaStore and
      * return the content:// Uri as the record path.
      */
-    private fun saveReceivedFile(fileName: String, body: ByteArray): String {
+    private fun openReceiveTarget(fileName: String): ReceiveTarget {
         val dir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
             "AnySend"
@@ -661,10 +612,11 @@ class LocalSendServer(
         dir.mkdirs()
         val outFile = TransferHistory.dedupeFile(dir, fileName)
         try {
-            FileOutputStream(outFile).use { fos ->
-                fos.write(body)
+            val fos = FileOutputStream(outFile)
+            return ReceiveTarget(fos, outFile.absolutePath) {
+                runCatching { fos.close() }
+                outFile.delete()
             }
-            return outFile.absolutePath
         } catch (e: Exception) {
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
@@ -674,8 +626,15 @@ class LocalSendServer(
             val uri = context.contentResolver.insert(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
             ) ?: throw e
-            context.contentResolver.openOutputStream(uri)?.use { it.write(body) }
-            return uri.toString()
+            val stream = context.contentResolver.openOutputStream(uri)
+                ?: run {
+                    context.contentResolver.delete(uri, null, null)
+                    throw e
+                }
+            return ReceiveTarget(stream, uri.toString()) {
+                runCatching { stream.close() }
+                runCatching { context.contentResolver.delete(uri, null, null) }
+            }
         }
     }
 
@@ -688,13 +647,6 @@ class LocalSendServer(
         if (resp.body.isNotEmpty()) {
             net.write(conn, resp.body)
         }
-    }
-
-    private fun appendBytes(dst: ByteArray, src: ByteArray): ByteArray {
-        val out = ByteArray(dst.size + src.size)
-        dst.copyInto(out, 0)
-        src.copyInto(out, dst.size)
-        return out
     }
 
     /** Find the '\r\n\r\n' header/body separator. Returns -1 when absent. */

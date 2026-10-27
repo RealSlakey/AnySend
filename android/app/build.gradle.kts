@@ -78,4 +78,6 @@ dependencies {
     if (tsnetbridgeAar.exists()) {
         implementation(files("libs/tsnetbridge.aar"))
     }
+
+    testImplementation("junit:junit:4.13.2")
 }
