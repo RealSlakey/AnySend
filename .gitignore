@@ -63,3 +63,8 @@ logs/
 
 # === 本地协作数据（AI 记忆/会话缓存，不入库） ===
 .workbuddy/
+
+# Go c-shared 构建的临时残留
+go/cmd/cshared/out/*-go-tmp-umask
+# gomobile 生成的 sources jar（gradle 只用 .aar）
+android/app/libs/tsnetbridge-sources.jar

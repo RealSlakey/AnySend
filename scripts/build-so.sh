@@ -36,7 +36,9 @@ GOOS=linux \
 GOARCH=arm64 \
 CC="${CC}" \
 CXX="${OHOS_LLVM}/bin/aarch64-unknown-linux-ohos-clang++" \
-  go build -buildmode=c-shared -o "${OUT_DIR}/libtsnetbridge.so" ./cmd/cshared
+  go build -buildmode=c-shared -trimpath \
+    -ldflags='-s -w' \
+    -o "${OUT_DIR}/libtsnetbridge.so" ./cmd/cshared
 
 echo "Output: ${OUT_DIR}/libtsnetbridge.so"
 file "${OUT_DIR}/libtsnetbridge.so"

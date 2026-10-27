@@ -44,6 +44,15 @@ val tsnetbridgeAar = file("libs/tsnetbridge.aar")
 android.sourceSets.getByName("main") {
     if (!tsnetbridgeAar.exists()) {
         java.srcDir("src/stub/java")
+        // The stub compiles and runs (Direct LAN Mode only), but every
+        // tailnet feature silently dies. Make that impossible to miss.
+        logger.warn(
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n" +
+            "  libs/tsnetbridge.aar is MISSING - compiling the stub instead.\n" +
+            "  The APK will build, but all Tailscale/tsnet features are dead.\n" +
+            "  Build it first: scripts/build-aar.sh (needs Go + Android NDK)\n" +
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        )
     }
 }
 

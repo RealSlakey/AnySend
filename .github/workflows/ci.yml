@@ -1,0 +1,49 @@
+# Minimal CI: the checks that run without device SDKs.
+#
+# Not covered here (need DevEco/Command-Line Tools for HarmonyOS and Xcode
+# for the macOS fork): hvigor assembleHap and the Runner build. The Android
+# job compiles against the tsnetbridge *stub* when the AAR is absent, which
+# is exactly what a fresh clone sees — so it also verifies the stub path.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  kotlin:
+    name: Android compile (stub tsnet path)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Compile Kotlin + manifest
+        working-directory: android
+        run: ./gradlew :app:compileDebugKotlin --stacktrace -q
+
+  go:
+    name: Go vet + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - name: go vet
+        working-directory: go
+        run: go vet ./tsnetbridge/... ./cmd/...
+      - name: go build (cshared, host target)
+        working-directory: go
+        run: go build -trimpath -ldflags='-s -w' -o /tmp/libtsnetbridge.so ./cmd/cshared
+
+  scripts:
+    name: Shell syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: for f in scripts/*.sh macos/app/assets/tailscaled/*.sh; do bash -n "$f"; done

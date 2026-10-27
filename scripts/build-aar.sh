@@ -23,7 +23,11 @@ fi
 
 echo "Building tsnetbridge AAR (arm64-v8a)..."
 cd "${GO_DIR}"
+# -s -w strips the symbol table and DWARF: tsnet drags in gVisor + the whole
+# tailscale dependency tree, and unstripped libgojni.so was 41 MB of the 51 MB
+# APK. -trimpath keeps machine paths out of the binary.
 gomobile bind -target=android/arm64 -androidapi=24 \
+  -ldflags='-s -w' -trimpath \
   -o "${OUT_DIR}/tsnetbridge.aar" \
   ./tsnetbridge
 
