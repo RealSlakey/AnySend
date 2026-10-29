@@ -131,6 +131,18 @@ object TailscaleManager {
     }
 
     /**
+     * Dial a TLS connection through the Tailscale network.
+     *
+     * Official LocalSend peers serve HTTPS with a self-signed certificate, so
+     * verification is skipped on the Go side (still encrypted end to end).
+     * @return connection handle (>0) or -1 on error
+     */
+    suspend fun dialTls(network: String, addr: String): Long = withContext(Dispatchers.IO) {
+        val json = Tsnetbridge.dialTls(network, addr)
+        parseHandle(json)
+    }
+
+    /**
      * Listen on a Tailscale address.
      * @return listener handle (>0) or -1 on error
      */

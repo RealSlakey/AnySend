@@ -11,6 +11,16 @@ interface NetworkLayer {
     /** Open a TCP connection to addr (host:port). Returns handle or -1. */
     suspend fun dial(network: String, addr: String): Long
 
+    /**
+     * Open a TLS connection to addr (host:port). Returns handle or -1.
+     *
+     * Official LocalSend peers serve HTTPS with a per-device self-signed
+     * certificate, so the chain is intentionally not verified: the stream is
+     * still encrypted, and the peer's identity is pinned by the LAN/tailnet
+     * context rather than by a CA.
+     */
+    suspend fun dialTls(network: String, addr: String): Long
+
     /** Listen on addr. Returns listener handle or -1. */
     suspend fun listen(network: String, addr: String): Long
 

@@ -1,5 +1,6 @@
 package com.slakey.anysend
 
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -23,10 +24,12 @@ import com.slakey.anysend.protocol.NetworkLayer
 import com.slakey.anysend.protocol.TailscaleNetworkLayer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+import kotlin.coroutines.resume
 
 /**
  * Launched when the user shares a file to this app. Supports two ways to
@@ -38,6 +41,7 @@ class ShareActivity : AppCompatActivity() {
 
     private lateinit var tvFile: TextView
     private lateinit var etTargetIp: EditText
+    private lateinit var etPin: EditText
     private lateinit var btnSendDirect: Button
     private lateinit var lvPeers: ListView
     private lateinit var btnCancel: Button
@@ -52,6 +56,7 @@ class ShareActivity : AppCompatActivity() {
 
         tvFile = findViewById(R.id.tvFile)
         etTargetIp = findViewById(R.id.etTargetIp)
+        etPin = findViewById(R.id.etPin)
         btnSendDirect = findViewById(R.id.btnSendDirect)
         lvPeers = findViewById(R.id.lvPeers)
         btnCancel = findViewById(R.id.btnCancel)
@@ -216,26 +221,47 @@ class ShareActivity : AppCompatActivity() {
                 tvProgress.text = "无法连接到 $ip"
                 return@launch
             }
-            val resp = withContext(Dispatchers.IO) { sender.sendRequest(sharedFiles) }
-            if (resp == null) {
-                tvProgress.text = "发送请求被拒绝"
-                return@launch
+            var pin = etPin.text.toString().trim().ifEmpty { null }
+            var outcome = withContext(Dispatchers.IO) { sender.sendRequest(sharedFiles, pin) }
+            if (outcome is LocalSendSender.SendOutcome.NeedPin) {
+                // Receiver is PIN-protected (official LocalSend): ask once, retry.
+                val entered = promptPin()
+                if (entered == null) {
+                    tvProgress.text = "已取消：对方需要配对码"
+                    return@launch
+                }
+                pin = entered
+                outcome = withContext(Dispatchers.IO) { sender.sendRequest(sharedFiles, entered) }
             }
+            when (outcome) {
+                is LocalSendSender.SendOutcome.WrongPin -> {
+                    tvProgress.text = "配对码错误"
+                    return@launch
+                }
+                is LocalSendSender.SendOutcome.Rejected -> {
+                    val code = outcome.status
+                    tvProgress.text =
+                        if (code > 0) "发送请求被拒绝（HTTP $code）" else "连接中断"
+                    return@launch
+                }
+                else -> Unit
+            }
+            val accepted = (outcome as LocalSendSender.SendOutcome.Accepted).result
             // v2 wire format: response.files maps fileId -> per-file upload token
-            val acceptedFiles = resp.response.files
+            val acceptedFiles = accepted.response.files
             if (acceptedFiles.isEmpty()) {
                 tvProgress.text = "所有文件被拒绝"
                 return@launch
             }
             val totalBytes = acceptedFiles.keys.sumOf { fileId ->
-                resp.fileIdToFile[fileId]?.length() ?: 0L
+                accepted.fileIdToFile[fileId]?.length() ?: 0L
             }
             var sentBytes = 0L
             var allOk = true
             for ((fileId, fileToken) in acceptedFiles) {
-                val file = resp.fileIdToFile[fileId] ?: continue
+                val file = accepted.fileIdToFile[fileId] ?: continue
                 val ok = withContext(Dispatchers.IO) {
-                    sender.sendFile(resp.response.sessionId, fileId, fileToken, file) { sent, total ->
+                    sender.sendFile(accepted.response.sessionId, fileId, fileToken, file) { sent, total ->
                         runOnUiThread {
                             val overall = sentBytes + sent
                             progressBar.progress = if (totalBytes > 0) (overall * 100 / totalBytes).toInt() else 0
@@ -245,6 +271,9 @@ class ShareActivity : AppCompatActivity() {
                 }
                 if (!ok) {
                     allOk = false
+                    // Release the receiver's single session slot, otherwise the
+                    // next send is rejected with 409 until the peer restarts.
+                    sender.cancelSession(accepted.response.sessionId)
                     break
                 }
                 sentBytes += file.length()
@@ -252,7 +281,7 @@ class ShareActivity : AppCompatActivity() {
             if (allOk) {
                 // Record every delivered file in the transfer history.
                 acceptedFiles.keys.forEach { fileId ->
-                    val file = resp.fileIdToFile[fileId] ?: return@forEach
+                    val file = accepted.fileIdToFile[fileId] ?: return@forEach
                     TransferHistory.add(
                         this@ShareActivity, "send",
                         peerName.ifBlank { ip },
@@ -267,5 +296,27 @@ class ShareActivity : AppCompatActivity() {
             btnCancel.text = "关闭"
             btnCancel.setOnClickListener { finish() }
         }
+    }
+
+    /**
+     * Ask for the receiver's pairing PIN.
+     *
+     * Official LocalSend answers 401 on prepare-upload until the right PIN
+     * arrives, so the retry only happens once the user types something.
+     */
+    private suspend fun promptPin(): String? = suspendCancellableCoroutine { cont ->
+        val input = EditText(this)
+        input.hint = "配对码"
+        input.inputType = android.text.InputType.TYPE_CLASS_TEXT
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("对方需要配对码")
+            .setMessage("请输入接收设备上显示的 PIN")
+            .setView(input)
+            .setPositiveButton("确定") { _, _ -> cont.resume(input.text.toString().trim()) }
+            .setNegativeButton("取消") { _, _ -> cont.resume(null) }
+            .setOnCancelListener { cont.resume(null) }
+            .create()
+        dialog.show()
+        cont.invokeOnCancellation { dialog.dismiss() }
     }
 }

@@ -10,6 +10,9 @@ class TailscaleNetworkLayer : NetworkLayer {
     override suspend fun dial(network: String, addr: String): Long =
         TailscaleManager.dial(network, addr)
 
+    override suspend fun dialTls(network: String, addr: String): Long =
+        TailscaleManager.dialTls(network, addr)
+
     override suspend fun listen(network: String, addr: String): Long =
         TailscaleManager.listen(network, addr)
 

@@ -52,6 +52,8 @@ export interface FileInfo {
 export interface SendRequest {
   info: DeviceInfo;
   files: Record<string, FileInfo>;
+  /** 配对码：仅在接收端要求时携带（官方 LocalSend 的 pin 字段）。 */
+  pin?: string;
 }
 
 export interface SendRequestResponse {

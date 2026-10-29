@@ -7,7 +7,7 @@
 //    the target device (AppStorage 'shareTargetIp').
 
 import { TailscaleManager, PeerInfo } from '../bridge/TailscaleManager';
-import { LocalSendSender } from '../protocol/LocalSendSender';
+import { LocalSendSender, SendOutcomeKind, SendRequestResult } from '../protocol/LocalSendSender';
 import { DirectNetworkLayer } from '../protocol/DirectNetworkLayer';
 import { TailscaleNetworkLayer } from '../protocol/TailscaleNetworkLayer';
 import { NetworkLayer } from '../protocol/NetworkLayer';
@@ -57,6 +57,8 @@ struct ShareView {
   @State sending: boolean = false;
   @State targetIp: string = '';
   @State targetName: string = '';
+  /** 配对码：官方 LocalSend 开启 PIN 保护时才需要，留空即可。 */
+  @State pin: string = '';
   // Share Kit resolves the shared records asynchronously, so stay bound to the
   // AppStorage entry instead of snapshotting it when the component is built.
   @StorageLink('sharedUris') @Watch('onSharedUrisChanged') sharedUris: string[] = [];
@@ -100,6 +102,18 @@ struct ShareView {
               .margin({ top: 10 })
               .onChange((value: string) => {
                 this.targetIp = value;
+              })
+            // 可选：官方 LocalSend 开了 PIN 保护时填写，AnySend 之间留空
+            TextInput({ placeholder: '配对码 PIN（对方未开启可留空）', text: this.pin })
+              .type(InputType.Normal)
+              .height(44)
+              .borderRadius(Tokens.RADIUS_CTRL)
+              .backgroundColor($r('app.color.field'))
+              .placeholderColor($r('sys.color.font_tertiary'))
+              .width('100%')
+              .margin({ top: 8 })
+              .onChange((value: string) => {
+                this.pin = value;
               })
             Button('发送到该 IP')
               .width('100%')
@@ -271,17 +285,32 @@ struct ShareView {
 
     const receiver = await sender.register();
     if (!receiver) {
-      this.progressText = `无法连接到 ${ip}`;
+      this.progressText = sender.peerNeedsTls
+        ? '对方开启了 HTTPS 加密；鸿蒙端不支持自签证书，请改用安卓端发送，或让对方关闭加密'
+        : `无法连接到 ${ip}`;
       this.sending = false;
       return;
     }
 
-    const result = await sender.sendRequest(this.sharedUris);
-    if (!result) {
-      this.progressText = '发送请求被拒绝';
+    const outcome = await sender.sendRequest(this.sharedUris, this.pin);
+    if (outcome.kind === SendOutcomeKind.NEED_PIN) {
+      this.progressText = '对方需要配对码，请填写 PIN 后重试';
       this.sending = false;
       return;
     }
+    if (outcome.kind === SendOutcomeKind.WRONG_PIN) {
+      this.progressText = '配对码错误';
+      this.sending = false;
+      return;
+    }
+    if (outcome.kind !== SendOutcomeKind.ACCEPTED || !outcome.result) {
+      this.progressText = outcome.status > 0
+        ? `发送请求被拒绝（HTTP ${outcome.status}）`
+        : '连接中断';
+      this.sending = false;
+      return;
+    }
+    const result = outcome.result as SendRequestResult;
 
     // v2 wire format: response.files maps fileId -> per-file upload token
     const accepted: string[] = Object.keys(result.response.files);
@@ -321,6 +350,9 @@ struct ShareView {
       });
       if (!ok) {
         allOk = false;
+        // Release the receiver's single session slot, otherwise the next send
+        // is rejected with 409 until the receiving app is restarted.
+        await sender.cancelSession(result.response.sessionId);
         break;
       }
       try {

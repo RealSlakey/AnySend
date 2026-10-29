@@ -47,10 +47,15 @@ data class FileInfo(
     val preview: String? = null
 )
 
-/** POST /send-request body */
+/** POST /prepare-upload body (legacy AnySend builds call it /send-request). */
 data class SendRequest(
     val info: DeviceInfo,
-    val files: Map<String, FileInfo>
+    val files: Map<String, FileInfo>,
+    /**
+     * Pairing PIN, sent only when the receiver asks for one. Official
+     * LocalSend returns 401 on prepare-upload until the right PIN arrives.
+     */
+    val pin: String? = null
 )
 
 /** POST /send-request response: per-file decision */

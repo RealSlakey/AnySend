@@ -17,6 +17,7 @@ class HttpBodyReaderTest {
     private class FakeNet(var chunks: ArrayDeque<ByteArray>) : NetworkLayer {
         var reads = 0
         override suspend fun dial(network: String, addr: String) = -1L
+        override suspend fun dialTls(network: String, addr: String) = -1L
         override suspend fun listen(network: String, addr: String) = -1L
         override suspend fun accept(listenerHandle: Long) = -1L
         override suspend fun read(handle: Long, maxLen: Int): ByteArray? {

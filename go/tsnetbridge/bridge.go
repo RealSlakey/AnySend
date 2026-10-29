@@ -7,6 +7,7 @@ package tsnetbridge
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -441,6 +442,54 @@ func Dial(network, addr string) string {
 	}
 	id := registerConn(conn)
 	return fmt.Sprintf(`{"handle":%d}`, id)
+}
+
+// DialTls opens a TLS connection through the Tailscale network.
+//
+// LocalSend peers serve HTTPS with a per-device self-signed certificate, so
+// the chain is deliberately not verified: the link is still encrypted, and
+// peer identity is already pinned by the tailnet itself.
+// Returns a handle id used by Read/Write/CloseConn, or an error string.
+func DialTls(network, addr string) string {
+	if network != "tcp" {
+		return `{"error":"tls is tcp-only"}`
+	}
+
+	// Only guard the state read with mu: the dial + handshake below can take
+	// tens of seconds and must not block the rest of the bridge.
+	mu.Lock()
+	serverRef := server
+	running := started && server != nil
+	mu.Unlock()
+	if !running || serverRef == nil {
+		return `{"error":"not started"}`
+	}
+
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelDial()
+	raw, err := serverRef.Dial(dialCtx, network, addr)
+	if err != nil {
+		return fmt.Sprintf(`{"error":%q}`, err.Error())
+	}
+
+	host, _, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		host = addr
+	}
+	conn := tls.Client(raw, &tls.Config{
+		// LocalSend ships a self-signed cert per device; there is no CA to
+		// chain to, so verification is skipped on purpose.
+		InsecureSkipVerify: true,
+		ServerName:         host,
+	})
+	hsCtx, cancelHs := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelHs()
+	if err := conn.HandshakeContext(hsCtx); err != nil {
+		raw.Close()
+		return fmt.Sprintf(`{"error":%q}`, err.Error())
+	}
+
+	return fmt.Sprintf(`{"handle":%d}`, registerConn(conn))
 }
 
 // Listen opens a listener on the Tailscale network.

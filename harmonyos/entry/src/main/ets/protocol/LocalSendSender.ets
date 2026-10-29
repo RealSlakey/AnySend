@@ -27,10 +27,34 @@ export interface SendRequestResult {
   fileIdToPath: Record<string, string>;
 }
 
+/** prepare-upload 的四种结局。 */
+export enum SendOutcomeKind {
+  ACCEPTED = 0,
+  /** 接收端要求配对码，但我们还没填。 */
+  NEED_PIN = 1,
+  /** 填了配对码，但被拒。 */
+  WRONG_PIN = 2,
+  /** 其它失败，status 为 HTTP 码（负数表示传输层失败）。 */
+  REJECTED = 3
+}
+
+export interface SendOutcome {
+  kind: SendOutcomeKind;
+  result: SendRequestResult | null;
+  status: number;
+}
+
 export class LocalSendSender {
   private receiverIp: string;
   private selfInfo: DeviceInfo;
   private network: NetworkLayer;
+
+  /**
+   * 明文请求连上了却拿不到任何 HTTP 响应 —— 说明对端只讲 HTTPS。
+   * 鸿蒙的 TLSSocket 只信任系统 CA，无法接受 LocalSend 的自签证书，
+   * 调用方据此给出明确提示，而不是笼统的“连接失败”。
+   */
+  peerNeedsTls: boolean = false;
 
   constructor(receiverIp: string, selfInfo: DeviceInfo, network: NetworkLayer) {
     this.receiverIp = receiverIp;
@@ -46,7 +70,8 @@ export class LocalSendSender {
   private async httpRequest(method: string, path: string, contentType: string | null, body: ArrayBuffer | null): Promise<HttpResponse> {
     const conn = await this.openConn();
     if (conn <= 0) {
-      return { status: 0, headers: {}, body: new ArrayBuffer(0) };
+      // -1：套接字都没打开，不存在“对端讲什么协议”这一信息。
+      return { status: -1, headers: {}, body: new ArrayBuffer(0) };
     }
     try {
       const headerLines: string[] = [];
@@ -114,10 +139,19 @@ export class LocalSendSender {
     return { status: status, headers: headers, body: finalBytes.slice().buffer as ArrayBuffer };
   }
 
-  /** Step 1: register. Returns receiver's DeviceInfo or null. */
+  /**
+   * Step 1: register. Returns receiver's DeviceInfo or null.
+   *
+   * 顺带识别传输协议：明文连上却读不到 HTTP 响应（status 0）说明对端只
+   * 提供 HTTPS，置位 [peerNeedsTls] 让界面给出准确提示。
+   */
   async register(): Promise<DeviceInfo | null> {
     const body = stringToArrayBuffer(JSON.stringify(this.selfInfo));
     const resp = await this.httpRequest('POST', LocalSendConst.PATH_REGISTER, 'application/json', body);
+    if (resp.status === 0) {
+      this.peerNeedsTls = true;
+      return null;
+    }
     if (resp.status !== 200) {
       return null;
     }
@@ -128,8 +162,12 @@ export class LocalSendSender {
     }
   }
 
-  /** Step 2: send file metadata. Returns response + fileId->path map, or null. */
-  async sendRequest(filePaths: string[]): Promise<SendRequestResult | null> {
+  /**
+   * Step 2: announce the files and collect per-file upload tokens.
+   *
+   * [pin] 只在接收端要求时携带；401 表示需要配对码（或配对码错误）。
+   */
+  async sendRequest(filePaths: string[], pin?: string): Promise<SendOutcome> {
     const fileIdToPath: Record<string, string> = {};
     const files: Record<string, FileInfo> = {};
     for (const path of filePaths) {
@@ -144,17 +182,37 @@ export class LocalSendSender {
         fileType: guessMime(fileName)
       };
     }
+    const trimmedPin: string = pin ? pin.trim() : '';
     const sendReq: SendRequest = { info: this.selfInfo, files };
+    if (trimmedPin.length > 0) {
+      sendReq.pin = trimmedPin;
+    }
     const body = stringToArrayBuffer(JSON.stringify(sendReq));
-    const resp = await this.httpRequest('POST', LocalSendConst.PATH_SEND_REQUEST, 'application/json', body);
+    // Official LocalSend v2 receivers (e.g. the macOS app) only expose
+    // /prepare-upload; the legacy AnySend route is kept for old builds.
+    let resp = await this.httpRequest('POST', LocalSendConst.PATH_PREPARE_UPLOAD, 'application/json', body);
+    if (resp.status === 404) {
+      resp = await this.httpRequest('POST', LocalSendConst.PATH_SEND_REQUEST, 'application/json', body);
+    }
+    if (resp.status === 401) {
+      return {
+        kind: trimmedPin.length > 0 ? SendOutcomeKind.WRONG_PIN : SendOutcomeKind.NEED_PIN,
+        result: null,
+        status: 401
+      };
+    }
     if (resp.status !== 200) {
-      return null;
+      return { kind: SendOutcomeKind.REJECTED, result: null, status: resp.status };
     }
     try {
       const response = JSON.parse(arrayBufferToString(resp.body)) as SendRequestResponse;
-      return { response, fileIdToPath };
+      return {
+        kind: SendOutcomeKind.ACCEPTED,
+        result: { response, fileIdToPath },
+        status: 200
+      };
     } catch (e) {
-      return null;
+      return { kind: SendOutcomeKind.REJECTED, result: null, status: -2 };
     }
   }
 
@@ -176,7 +234,7 @@ export class LocalSendSender {
       const mime = guessMime(fileName);
       // Text uploads carry their charset; the metadata fileType stays text/plain.
       const contentType = mime.startsWith('text/') ? `${mime}; charset=utf-8` : mime;
-      const path = `${LocalSendConst.PATH_SEND}?sessionId=${sessionId}&fileId=${fileId}&token=${fileToken}`;
+      const path = `${LocalSendConst.PATH_UPLOAD}?sessionId=${sessionId}&fileId=${fileId}&token=${fileToken}`;
       const headerLines: string[] = [
         `POST ${path} HTTP/1.1`,
         `Host: ${this.receiverIp}:${LocalSendConst.PORT}`,
@@ -223,6 +281,18 @@ export class LocalSendSender {
       return resp.status === 200;
     } finally {
       this.network.closeConn(conn);
+    }
+  }
+
+  /**
+   * Cancel an in-flight session. Receivers such as the macOS app allow only
+   * one session at a time, so a failed/aborted transfer must release it or
+   * every later send is rejected as "blocked by another session".
+   */
+  async cancelSession(sessionId: string): Promise<void> {
+    try {
+      await this.httpRequest('POST', `${LocalSendConst.PATH_CANCEL}?sessionId=${sessionId}`, null, null);
+    } catch (e) {
     }
   }
 }

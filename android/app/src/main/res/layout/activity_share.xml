@@ -69,6 +69,25 @@
         android:textColorHint="@color/outline_grey"
         android:textSize="14sp" />
 
+    <!-- Optional pairing PIN. Official LocalSend receivers ask for one when
+         PIN protection is on; leave empty for AnySend peers. -->
+    <EditText
+        android:id="@+id/etPin"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_code_block"
+        android:hint="配对码 PIN（对方未开启可留空）"
+        android:inputType="text"
+        android:maxLines="1"
+        android:paddingLeft="14dp"
+        android:paddingRight="14dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="12dp"
+        android:textColor="@color/on_surface"
+        android:textColorHint="@color/outline_grey"
+        android:textSize="14sp" />
+
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btnSendDirect"
         android:layout_width="match_parent"

@@ -11,17 +11,27 @@ import java.util.UUID
  * LocalSend sender. Routes all traffic through the provided [NetworkLayer]
  * (either Tailscale userspace netstack or system sockets in Direct LAN mode).
  *
- * Flow: register -> send-request -> send (per accepted file).
+ * Transport: AnySend receivers serve plain HTTP, official LocalSend receivers
+ * default to HTTPS with a self-signed cert. The scheme is discovered on the
+ * first request (see [register]) and then reused for the whole transfer.
+ *
+ * Flow: register -> prepare-upload -> upload (per accepted file).
  */
 class LocalSendSender(
     private val receiverIp: String,
     private val selfInfo: DeviceInfo,
-    private val network: NetworkLayer
+    private val network: NetworkLayer,
+    private val port: Int = LocalSendConst.PORT
 ) {
     private val gson = Gson()
 
+    /** Set once a plaintext attempt gets no HTTP answer, i.e. peer is HTTPS. */
+    @Volatile
+    private var useTls = false
+
     private suspend fun openConn(): Long {
-        return network.dial("tcp", "$receiverIp:${LocalSendConst.PORT}")
+        val addr = "$receiverIp:$port"
+        return if (useTls) network.dialTls("tcp", addr) else network.dial("tcp", addr)
     }
 
     /** Send a raw HTTP request and return the parsed response. */
@@ -32,12 +42,14 @@ class LocalSendSender(
         body: ByteArray?
     ): HttpResponse = withContext(Dispatchers.IO) {
         val conn = openConn()
-        if (conn <= 0) return@withContext HttpResponse(0, emptyMap(), ByteArray(0))
+        // -1 (not 0): the socket never opened, so there is no protocol hint
+        // to learn from and no point retrying over TLS.
+        if (conn <= 0) return@withContext HttpResponse(-1, emptyMap(), ByteArray(0))
 
         try {
             val reqBuilder = StringBuilder()
             reqBuilder.append("$method $path HTTP/1.1\r\n")
-            reqBuilder.append("Host: $receiverIp:${LocalSendConst.PORT}\r\n")
+            reqBuilder.append("Host: $receiverIp:$port\r\n")
             reqBuilder.append("Connection: close\r\n")
             if (contentType != null) {
                 reqBuilder.append("Content-Type: $contentType\r\n")
@@ -122,10 +134,21 @@ class LocalSendSender(
         val body: ByteArray
     )
 
-    /** Step 1: register. Returns receiver's DeviceInfo or null. */
+    /**
+     * Step 1: register. Returns the receiver's DeviceInfo, or null.
+     *
+     * Doubles as transport discovery: a peer running LocalSend's default
+     * HTTPS closes a plaintext connection without any HTTP answer (status 0),
+     * which is the cue to retry over TLS. [useTls] then sticks for the rest
+     * of the transfer.
+     */
     suspend fun register(): DeviceInfo? {
         val body = gson.toJson(selfInfo).toByteArray()
-        val resp = httpRequest("POST", LocalSendConst.PATH_REGISTER, "application/json", body)
+        var resp = httpRequest("POST", LocalSendConst.PATH_REGISTER, "application/json", body)
+        if (resp.status == 0 && !useTls) {
+            useTls = true
+            resp = httpRequest("POST", LocalSendConst.PATH_REGISTER, "application/json", body)
+        }
         if (resp.status != 200) return null
         return try {
             gson.fromJson(String(resp.body), DeviceInfo::class.java)
@@ -134,8 +157,13 @@ class LocalSendSender(
         }
     }
 
-    /** Step 2: send file metadata. Returns response + fileId->File map, or null if rejected. */
-    suspend fun sendRequest(files: List<File>): SendRequestResult? {
+    /**
+     * Step 2: announce the files and collect per-file upload tokens.
+     *
+     * [pin] is only sent when the receiver demands one; a 401 means the
+     * receiver wants a PIN we have not supplied (or supplied wrongly).
+     */
+    suspend fun sendRequest(files: List<File>, pin: String? = null): SendOutcome {
         val fileIdToFile = mutableMapOf<String, File>()
         val fileMap = files.associate { f ->
             val id = UUID.randomUUID().toString()
@@ -147,15 +175,23 @@ class LocalSendSender(
                 fileType = guessMime(f.name)
             )
         }
-        val sendReq = SendRequest(info = selfInfo, files = fileMap)
+        val sendReq = SendRequest(info = selfInfo, files = fileMap, pin = pin)
         val body = gson.toJson(sendReq).toByteArray()
-        val resp = httpRequest("POST", LocalSendConst.PATH_SEND_REQUEST, "application/json", body)
-        if (resp.status != 200) return null
+        // Official LocalSend v2 receivers only expose /prepare-upload; the
+        // legacy AnySend route is kept for old builds (404 = pre-v2 peer).
+        var resp = httpRequest("POST", LocalSendConst.PATH_PREPARE_UPLOAD, "application/json", body)
+        if (resp.status == 404) {
+            resp = httpRequest("POST", LocalSendConst.PATH_SEND_REQUEST, "application/json", body)
+        }
+        if (resp.status == 401) {
+            return if (pin.isNullOrEmpty()) SendOutcome.NeedPin else SendOutcome.WrongPin
+        }
+        if (resp.status != 200) return SendOutcome.Rejected(resp.status)
         return try {
             val response = gson.fromJson(String(resp.body), SendRequestResponse::class.java)
-            SendRequestResult(response, fileIdToFile)
+            SendOutcome.Accepted(SendRequestResult(response, fileIdToFile))
         } catch (e: Exception) {
-            null
+            SendOutcome.Rejected(-2)
         }
     }
 
@@ -164,6 +200,20 @@ class LocalSendSender(
         val response: SendRequestResponse,
         val fileIdToFile: Map<String, File>
     )
+
+    /** Result of the prepare-upload step. */
+    sealed class SendOutcome {
+        data class Accepted(val result: SendRequestResult) : SendOutcome()
+
+        /** Receiver requires a pairing PIN we have not sent yet. */
+        object NeedPin : SendOutcome()
+
+        /** Receiver rejected the PIN we sent. */
+        object WrongPin : SendOutcome()
+
+        /** Anything else; [status] is the HTTP code (negative = transport). */
+        data class Rejected(val status: Int) : SendOutcome()
+    }
 
     /**
      * Step 3: upload a single file with progress reporting.
@@ -187,7 +237,7 @@ class LocalSendSender(
             val path = "${LocalSendConst.PATH_UPLOAD}?sessionId=$sessionId&fileId=$fileId&token=$fileToken"
             val header = StringBuilder()
                 .append("POST $path HTTP/1.1\r\n")
-                .append("Host: $receiverIp:${LocalSendConst.PORT}\r\n")
+                .append("Host: $receiverIp:$port\r\n")
                 .append("Connection: close\r\n")
                 .append("Content-Type: $uploadType\r\n")
                 .append("Content-Length: $total\r\n")
@@ -212,6 +262,15 @@ class LocalSendSender(
         } finally {
             network.closeConn(conn)
         }
+    }
+
+    /**
+     * Cancel an in-flight session. Receivers such as the macOS app allow only
+     * one session at a time, so a failed/aborted transfer must release it or
+     * every later send is rejected as "blocked by another session".
+     */
+    suspend fun cancelSession(sessionId: String) {
+        httpRequest("POST", "${LocalSendConst.PATH_CANCEL}?sessionId=$sessionId", null, null)
     }
 
     private fun guessMime(fileName: String): String {
