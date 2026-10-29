@@ -53,6 +53,8 @@ class ShareActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_share)
+        // RSA key-gen on first run; keep it off the UI thread.
+        Thread { com.slakey.anysend.protocol.DeviceIdentity.init(this) }.start()
 
         tvFile = findViewById(R.id.tvFile)
         etTargetIp = findViewById(R.id.etTargetIp)

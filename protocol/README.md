@@ -49,7 +49,7 @@
     | --- | --- | --- |
     | macOS | ✅ | Rust 客户端 `with_client_auth_cert` + 指纹固定 |
     | 鸿蒙 | ✅ | RemoteCommunicationKit：`remoteValidation: 'skip'` 跳过服务端校验，`certificate` 出示本机证书；`DeviceIdentity` 首次启动用 CryptoArchitectureKit 生成，私钥留在沙箱 |
-    | Android | ⚠️ 待补 | `SSLSocketFactory` 只做了 TrustAll，没有客户端证书，连官方 HTTPS 对端会被拒 |
+    | Android | ✅ | `DeviceIdentity` 用 `KeyPairGenerator` + 手写 DER 生成证书存 PKCS#12，`SSLContext` 装 `KeyManager` 出示；服务端信任仍为 TrustAll |
 - **配对码（PIN）**：`prepare-upload` 请求体可带 `"pin": "1234"`；接收端未开启 PIN 时
   省略该字段。接收端要求 PIN 但未提供/不匹配时返回 **401**，发送端据此提示用户输入。
 

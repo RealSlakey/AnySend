@@ -51,7 +51,10 @@ class DirectNetworkLayer : NetworkLayer {
             val raw = Socket()
             raw.tcpNoDelay = true
             raw.connect(InetSocketAddress(host, port), 5000)
-            val ssl = TRUST_ALL_CONTEXT.socketFactory
+            // Stock LocalSend requires a client certificate; DeviceIdentity
+            // supplies ours and keeps trusting the peer's self-signed one.
+            val context = DeviceIdentity.sslContext() ?: TRUST_ALL_CONTEXT
+            val ssl = context.socketFactory
                 .createSocket(raw, host, port, true) as SSLSocket
             ssl.useClientMode = true
             ssl.startHandshake()

@@ -80,6 +80,12 @@ object AppActions {
 
     /** Stable per-install LocalSend fingerprint (identifies this device). */
     fun deviceFingerprint(context: Context): String {
+        // HTTPS peers derive the sender's identity from the certificate it
+        // presents during the handshake, so the advertised fingerprint has to
+        // be that certificate's SHA-256; a random UUID would not match.
+        com.slakey.anysend.protocol.DeviceIdentity.fingerprint().let { fromCert ->
+            if (fromCert.isNotEmpty()) return fromCert
+        }
         val prefs = context.getSharedPreferences("tslsb", Context.MODE_PRIVATE)
         prefs.getString("fingerprint", null)?.let { return it }
         val fp = java.util.UUID.randomUUID().toString()

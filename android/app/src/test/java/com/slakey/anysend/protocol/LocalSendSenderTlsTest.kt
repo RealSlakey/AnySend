@@ -11,11 +11,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.net.ServerSocket
+import java.nio.file.Files
 import java.net.Socket
 import java.security.KeyStore
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 /**
  * Interop tests for the official LocalSend transport.
@@ -134,8 +139,58 @@ class LocalSendSenderTlsTest {
         return f
     }
 
-    private fun startServer(tls: Boolean, requiredPin: String? = null): V2TestServer =
-        V2TestServer(tls, requiredPin).also { servers.add(it) }
+    private fun startServer(
+        tls: Boolean,
+        requiredPin: String? = null,
+        requireClientCert: Boolean = false
+    ): V2TestServer = V2TestServer(tls, requiredPin, requireClientCert).also { servers.add(it) }
+
+    /**
+     * Stock LocalSend asks for a client certificate and fails the handshake
+     * without one, so the sender has to offer its device certificate.
+     */
+    @Test
+    fun presentsClientCertificateWhenPeerRequiresIt() = runBlocking {
+        val dir = Files.createTempDirectory("identity").toFile().also { tempFiles.add(it) }
+        DeviceIdentity.load(dir, "test-password")
+
+        val server = startServer(tls = true, requireClientCert = true)
+        val payload = "mutual-tls".toByteArray()
+        val sender = senderFor(server.port)
+
+        assertNotNull("register should survive client-auth TLS", sender.register())
+        val outcome = sender.sendRequest(listOf(fileWith(payload)))
+        assertTrue("expected Accepted, got $outcome", outcome is LocalSendSender.SendOutcome.Accepted)
+        val accepted = outcome as LocalSendSender.SendOutcome.Accepted
+        val fileId = accepted.result.response.files.keys.first()
+
+        val ok = sender.sendFile(
+            accepted.result.response.sessionId,
+            fileId,
+            accepted.result.response.files.getValue(fileId),
+            accepted.result.fileIdToFile.getValue(fileId)
+        ) { _, _ -> }
+
+        assertTrue("upload over mutual TLS should succeed", ok)
+        assertArrayEquals(payload, server.lastUpload)
+    }
+
+    /** The generated certificate must look like the one LocalSend mints. */
+    @Test
+    fun generatedIdentityIsALocalSendCertificate() {
+        val dir = Files.createTempDirectory("identity-shape").toFile().also { tempFiles.add(it) }
+        DeviceIdentity.load(dir, "test-password")
+
+        val ks = KeyStore.getInstance("PKCS12")
+        File(dir, "identity.p12").inputStream().use { ks.load(it, "test-password".toCharArray()) }
+        val cert = ks.getCertificate("identity") as X509Certificate
+        // Parsing it back is half the test: a malformed DER would throw here.
+        CertificateFactory.getInstance("X.509").generateCertificate(cert.encoded.inputStream())
+
+        assertEquals("CN=LocalSend User", cert.subjectX500Principal.name)
+        assertEquals(cert.subjectX500Principal, cert.issuerX500Principal)
+        assertEquals(64, DeviceIdentity.fingerprint().length)
+    }
 }
 
 /**
@@ -143,7 +198,11 @@ class LocalSendSenderTlsTest {
  * the sender (register / prepare-upload / upload). Handles one connection at
  * a time, like the real server's single session slot.
  */
-private class V2TestServer(tls: Boolean, private val requiredPin: String?) {
+private class V2TestServer(
+    tls: Boolean,
+    private val requiredPin: String?,
+    private val requireClientCert: Boolean = false
+) {
 
     @Volatile
     var lastUpload: ByteArray? = null
@@ -173,9 +232,20 @@ private class V2TestServer(tls: Boolean, private val requiredPin: String?) {
         }
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
         kmf.init(ks, "testpass".toCharArray())
+        val trustAnyClient = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) = Unit
+            override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) = Unit
+            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+        }
         val ctx = SSLContext.getInstance("TLS")
-        ctx.init(kmf.keyManagers, null, null)
-        return ctx.serverSocketFactory.createServerSocket(0) as SSLServerSocket
+        ctx.init(
+            kmf.keyManagers,
+            if (requireClientCert) arrayOf<TrustManager>(trustAnyClient) else null,
+            null
+        )
+        val server = ctx.serverSocketFactory.createServerSocket(0) as SSLServerSocket
+        server.needClientAuth = requireClientCert
+        return server
     }
 
     private fun acceptLoop() {

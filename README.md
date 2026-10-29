@@ -52,7 +52,7 @@
 
 ## 线协议
 
-- **文件**：LocalSend v2，端口 `53317`。发送端 `register` → `prepare-upload` → 逐个 `upload`（旧版 AnySend 的 `send-request`/`send` 仍作为 404 回退保留）；接收端提供 `/info`、`/register`、`/prepare-upload`、`/upload`、`/cancel`。发送端先发明文 HTTP，连上却无响应时自动改走 TLS 并接受对端自签证书；官方 LocalSend 的 TLS 是双向的，所以发送端还要出示自己的设备证书（鸿蒙用 RemoteCommunicationKit + CryptoArchitectureKit 生成并出示，Android 尚未补）。接收端要求配对码时 `prepare-upload` 返回 401，客户端会提示输入 PIN。细节见 `protocol/README.md`。
+- **文件**：LocalSend v2，端口 `53317`。发送端 `register` → `prepare-upload` → 逐个 `upload`（旧版 AnySend 的 `send-request`/`send` 仍作为 404 回退保留）；接收端提供 `/info`、`/register`、`/prepare-upload`、`/upload`、`/cancel`。发送端先发明文 HTTP，连上却无响应时自动改走 TLS 并接受对端自签证书；官方 LocalSend 的 TLS 是双向的，所以发送端还要出示自己的设备证书（鸿蒙用 RemoteCommunicationKit + CryptoArchitectureKit，安卓用 SSLContext + KeyManager，各自首次启动生成并常驻沙箱）。接收端要求配对码时 `prepare-upload` 返回 401，客户端会提示输入 PIN。细节见 `protocol/README.md`。
 - **画面**：端口 `27042`。建连后 `1B dummy` → `64B` 设备名（UTF-8 零填充）→ `12B` codec meta（`u32 "h264"` / `width` / `height`）→ 帧序列；每帧头 `12B`（`u64` 最高位 config 包、次高位关键帧、低 62 位 PTS µs）+ `u32` 长度，payload 为 Annex-B。
 - **控制**：端口 `27043`，scrcpy 控制消息子集（按键、文本、触摸、滚动、剪贴板）。字节定义以 `harmonyos/entry/src/main/ets/scrcpy/client/tools/ControlPacket.ets` 为唯一权威。
 - **镜像引导**：主控端先 `POST /api/anysend/v1/mirror-prepare?hs=0` 到对端 LocalSend 端口，Android 侧经 Shizuku 起 scrcpy-server 并返回 `videoPort`/`controlPort`/`scid`。
