@@ -6,6 +6,7 @@ import { connection } from '@kit.NetworkKit';
 import { SmsStore } from '../sms/SmsStore';
 import { AutoConnect } from '../common/AutoConnect';
 import { DeviceProfile } from '../common/DeviceProfile';
+import { DeviceIdentity } from '../common/DeviceIdentity';
 import { LanDiscovery } from '../common/LanDiscovery';
 import { KeepAlive } from '../common/KeepAlive';
 
@@ -23,11 +24,15 @@ export default class EntryAbility extends UIAbility {
     // the receive server when a key was saved from a previous login.
     // Fire-and-forget: everything heavy runs on the worker thread, the UI
     // thread never blocks (watchdog safe).
-    DeviceProfile.init(this.context).then(() => {
-      // Answer LocalSend multicast discovery so peers can find us.
-      LanDiscovery.start();
-      AutoConnect.run(this.context);
-    });
+    // The device certificate has to exist before the fingerprint is read, and
+    // it is what HTTPS peers see during the TLS handshake.
+    DeviceIdentity.init(this.context)
+      .then(() => DeviceProfile.init(this.context))
+      .then(() => {
+        // Answer LocalSend multicast discovery so peers can find us.
+        LanDiscovery.start();
+        AutoConnect.run(this.context);
+      });
   }
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {

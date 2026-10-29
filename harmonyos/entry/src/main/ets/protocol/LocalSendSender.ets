@@ -12,6 +12,7 @@ import {
   createDeviceInfo,
   guessMime
 } from './LocalSendModels';
+import { RcpTransport } from './RcpTransport';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import util from '@ohos.util';
@@ -50,16 +51,49 @@ export class LocalSendSender {
   private network: NetworkLayer;
 
   /**
-   * 明文请求连上了却拿不到任何 HTTP 响应 —— 说明对端只讲 HTTPS。
-   * 鸿蒙的 TLSSocket 只信任系统 CA，无法接受 LocalSend 的自签证书，
-   * 调用方据此给出明确提示，而不是笼统的“连接失败”。
+   * 明文探测到对端不接受 HTTP（连上但一个字节都没回）——官方 LocalSend 只讲
+   * HTTPS。置位后调用方据此给出准确提示；[useTls] 为真时说明 TLS 已经打通，
+   * 此时本条提示不再成立。
    */
   peerNeedsTls: boolean = false;
+
+  /** 本次传输是否已经切到 HTTPS（官方 LocalSend 对端）。 */
+  private useTls: boolean = false;
+  private tls: RcpTransport | null = null;
 
   constructor(receiverIp: string, selfInfo: DeviceInfo, network: NetworkLayer) {
     this.receiverIp = receiverIp;
     this.selfInfo = selfInfo;
     this.network = network;
+  }
+
+  private tlsTransport(): RcpTransport {
+    if (this.tls === null) {
+      this.tls = new RcpTransport(this.receiverIp, LocalSendConst.PORT);
+    }
+    return this.tls;
+  }
+
+  /**
+   * POST a JSON body, transparently upgrading to HTTPS when the peer refuses
+   * plaintext. LocalSend's certificate is self-signed, so the upgrade goes
+   * through RemoteCommunicationKit (see RcpTransport) rather than TLSSocket.
+   */
+  private async postJson(path: string, json: string): Promise<HttpResponse> {
+    if (!this.useTls) {
+      const plain = await this.httpRequest('POST', path, 'application/json', stringToArrayBuffer(json));
+      if (plain.status !== 0) {
+        return plain;
+      }
+      // 连上了却读不到任何 HTTP 响应：对端在等 TLS 握手。
+      this.peerNeedsTls = true;
+    }
+    const secure = await this.tlsTransport().postJson(path, json);
+    if (secure.status > 0) {
+      this.useTls = true;
+      this.peerNeedsTls = false;
+    }
+    return { status: secure.status, headers: {}, body: stringToArrayBuffer(secure.body) };
   }
 
   private async openConn(): Promise<number> {
@@ -142,16 +176,11 @@ export class LocalSendSender {
   /**
    * Step 1: register. Returns receiver's DeviceInfo or null.
    *
-   * 顺带识别传输协议：明文连上却读不到 HTTP 响应（status 0）说明对端只
-   * 提供 HTTPS，置位 [peerNeedsTls] 让界面给出准确提示。
+   * 顺带识别传输协议：明文连上却读不到 HTTP 响应说明对端只提供 HTTPS，
+   * [postJson] 会自动改用加密通道重试。
    */
   async register(): Promise<DeviceInfo | null> {
-    const body = stringToArrayBuffer(JSON.stringify(this.selfInfo));
-    const resp = await this.httpRequest('POST', LocalSendConst.PATH_REGISTER, 'application/json', body);
-    if (resp.status === 0) {
-      this.peerNeedsTls = true;
-      return null;
-    }
+    const resp = await this.postJson(LocalSendConst.PATH_REGISTER, JSON.stringify(this.selfInfo));
     if (resp.status !== 200) {
       return null;
     }
@@ -187,12 +216,12 @@ export class LocalSendSender {
     if (trimmedPin.length > 0) {
       sendReq.pin = trimmedPin;
     }
-    const body = stringToArrayBuffer(JSON.stringify(sendReq));
+    const body = JSON.stringify(sendReq);
     // Official LocalSend v2 receivers (e.g. the macOS app) only expose
     // /prepare-upload; the legacy AnySend route is kept for old builds.
-    let resp = await this.httpRequest('POST', LocalSendConst.PATH_PREPARE_UPLOAD, 'application/json', body);
+    let resp = await this.postJson(LocalSendConst.PATH_PREPARE_UPLOAD, body);
     if (resp.status === 404) {
-      resp = await this.httpRequest('POST', LocalSendConst.PATH_SEND_REQUEST, 'application/json', body);
+      resp = await this.postJson(LocalSendConst.PATH_SEND_REQUEST, body);
     }
     if (resp.status === 401) {
       return {
@@ -224,6 +253,15 @@ export class LocalSendSender {
    * the receiver rejects uploads without it.
    */
   async sendFile(sessionId: string, fileId: string, fileToken: string, filePath: string, progress: (sent: number, total: number) => void): Promise<boolean> {
+    const uploadPath = `${LocalSendConst.PATH_UPLOAD}?sessionId=${sessionId}&fileId=${fileId}&token=${fileToken}`;
+    if (this.useTls) {
+      // HTTPS peer (stock LocalSend): raw body streamed off the file
+      // descriptor through RemoteCommunicationKit.
+      const total = getFileSize(filePath);
+      const mime = guessMime(extractFileName(filePath));
+      const status = await this.tlsTransport().postFile(uploadPath, filePath, mime, total, progress);
+      return status === 200;
+    }
     const conn = await this.openConn();
     if (conn <= 0) {
       return false;
@@ -234,7 +272,7 @@ export class LocalSendSender {
       const mime = guessMime(fileName);
       // Text uploads carry their charset; the metadata fileType stays text/plain.
       const contentType = mime.startsWith('text/') ? `${mime}; charset=utf-8` : mime;
-      const path = `${LocalSendConst.PATH_UPLOAD}?sessionId=${sessionId}&fileId=${fileId}&token=${fileToken}`;
+      const path = uploadPath;
       const headerLines: string[] = [
         `POST ${path} HTTP/1.1`,
         `Host: ${this.receiverIp}:${LocalSendConst.PORT}`,
@@ -291,8 +329,23 @@ export class LocalSendSender {
    */
   async cancelSession(sessionId: string): Promise<void> {
     try {
-      await this.httpRequest('POST', `${LocalSendConst.PATH_CANCEL}?sessionId=${sessionId}`, null, null);
+      await this.postJson(`${LocalSendConst.PATH_CANCEL}?sessionId=${sessionId}`, '{}');
     } catch (e) {
+    }
+  }
+
+  /** Release the HTTPS session (rcp caps the number of live sessions). */
+  close(): void {
+    if (this.tls !== null) {
+      this.tls.close();
+      this.tls = null;
+    }
+  }
+
+  /** Abort whatever request is in flight (user pressed back / cancelled). */
+  abort(): void {
+    if (this.tls !== null) {
+      this.tls.cancel();
     }
   }
 }
@@ -328,7 +381,13 @@ function getFileSize(pathOrUri: string): number {
 }
 
 function stringToArrayBuffer(str: string): ArrayBuffer {
-  return util.TextEncoder.create('utf-8').encodeInto(str).buffer as ArrayBuffer;
+  // encodeInto('') hands back undefined on device, and the empty body of a
+  // failed HTTPS request goes straight through here.
+  const encoded = util.TextEncoder.create('utf-8').encodeInto(str);
+  if (!encoded) {
+    return new ArrayBuffer(0);
+  }
+  return encoded.buffer as ArrayBuffer;
 }
 
 function arrayBufferToString(buf: ArrayBuffer): string {

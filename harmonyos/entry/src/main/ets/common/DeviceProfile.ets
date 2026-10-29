@@ -6,6 +6,7 @@
 // a registered node would require wiping node state and re-login.
 
 import { preferences } from '@kit.ArkData';
+import { DeviceIdentity } from './DeviceIdentity';
 import { common } from '@kit.AbilityKit';
 import util from '@ohos.util';
 
@@ -37,8 +38,18 @@ export class DeviceProfile {
     }
   }
 
-  /** Stable per-install fingerprint advertised over LocalSend. */
+  /**
+   * Stable per-install fingerprint advertised over LocalSend.
+   *
+   * Prefers the device certificate's SHA-256: HTTPS peers derive the sender's
+   * identity from the certificate presented during the handshake, and only
+   * accept a registration whose claimed fingerprint matches it.
+   */
   static fingerprint(): string {
+    const fromCert: string = DeviceIdentity.fingerprint();
+    if (fromCert.length > 0) {
+      return fromCert;
+    }
     return DeviceProfile.cachedFingerprint ?? '';
   }
 

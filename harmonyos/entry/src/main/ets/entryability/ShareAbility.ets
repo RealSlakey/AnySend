@@ -5,6 +5,7 @@ import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import { systemShare } from '@kit.ShareKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { TextShare } from '../common/TextShare';
+import { DeviceIdentity } from '../common/DeviceIdentity';
 
 /**
  * Share ability: receives ACTION_SEND wants with file URIs and/or plain text
@@ -17,12 +18,14 @@ import { TextShare } from '../common/TextShare';
  */
 export default class ShareAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
-    this.readShared(want);
+    // Share can be the first entry point (cold start from another app), so the
+    // device identity has to be ready here too — HTTPS sends need it.
+    DeviceIdentity.init(this.context).then(() => this.readShared(want));
   }
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     // Reused instance: refresh the payload so the open page picks up the new files.
-    this.readShared(want);
+    DeviceIdentity.init(this.context).then(() => this.readShared(want));
   }
 
   onDestroy(): void {

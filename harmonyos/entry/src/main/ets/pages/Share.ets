@@ -282,32 +282,37 @@ struct ShareView {
     this.progressText = `正在发送到 ${ip}...`;
     const self = createDeviceInfo(DeviceProfile.displayName(), 'HarmonyOS', DeviceProfile.fingerprint());
     const sender = new LocalSendSender(ip, self, network);
+    // Release the HTTPS session on every exit path (rcp caps live sessions).
+    const stop = (): void => {
+      this.sending = false;
+      sender.close();
+    };
 
     const receiver = await sender.register();
     if (!receiver) {
       this.progressText = sender.peerNeedsTls
-        ? '对方开启了 HTTPS 加密；鸿蒙端不支持自签证书，请改用安卓端发送，或让对方关闭加密'
+        ? '对方只接受 HTTPS（自签证书）；加密连接未能建立，请改用同一 Wi-Fi 直连后再试'
         : `无法连接到 ${ip}`;
-      this.sending = false;
+      stop();
       return;
     }
 
     const outcome = await sender.sendRequest(this.sharedUris, this.pin);
     if (outcome.kind === SendOutcomeKind.NEED_PIN) {
       this.progressText = '对方需要配对码，请填写 PIN 后重试';
-      this.sending = false;
+      stop();
       return;
     }
     if (outcome.kind === SendOutcomeKind.WRONG_PIN) {
       this.progressText = '配对码错误';
-      this.sending = false;
+      stop();
       return;
     }
     if (outcome.kind !== SendOutcomeKind.ACCEPTED || !outcome.result) {
       this.progressText = outcome.status > 0
         ? `发送请求被拒绝（HTTP ${outcome.status}）`
         : '连接中断';
-      this.sending = false;
+      stop();
       return;
     }
     const result = outcome.result as SendRequestResult;
@@ -316,7 +321,7 @@ struct ShareView {
     const accepted: string[] = Object.keys(result.response.files);
     if (accepted.length === 0) {
       this.progressText = '所有文件被拒绝';
-      this.sending = false;
+      stop();
       return;
     }
 
@@ -401,7 +406,7 @@ struct ShareView {
     } else {
       this.progressText = '发送失败';
     }
-    this.sending = false;
+    stop();
   }
 
   closeShare() {

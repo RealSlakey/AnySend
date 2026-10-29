@@ -34,12 +34,22 @@
 ## 传输与配对码
 
 - **接收端**：一律明文 HTTP，`/info` 返回 `"protocol": "http"`，官方客户端据此使用 HTTP。
+  官方 LocalSend 默认开加密，此时它对每个请求都要求客户端证书。
 - **发送端**：先发明文 HTTP；若连上了却读不到任何 HTTP 响应（状态 0），说明对端
   是 HTTPS-only（官方 LocalSend 默认开加密、每台设备一张自签证书），改用 TLS 重试，
   并在本次传输内记住该选择。
   - 自签证书**不校验链**（LocalSend 没有 CA 可链），链路仍然加密。
-  - 鸿蒙端受系统 API 限制：`@ohos.net.socket` 的 `TLSSocket` 只接受系统 CA，无法信任
-    自签证书，因此只能给出明确提示，不能直连 HTTPS 对端。
+  - **是双向 TLS**：服务端 `ClientCertVerifier` 会要求客户端证书，没带就
+    `certificate_required` 直接断链。所以发送端必须有自己的设备证书（RSA-2048、
+    `CN=LocalSend User`、自签、20 年有效），并在握手时出示。
+  - `DeviceInfo.fingerprint` 必须等于该证书 DER 的 SHA-256（大写十六进制）：接收端
+    用它核对“注册信息里声称的身份”和“握手里证明的身份”，不一致就不认这台设备。
+  - 各端实现：
+    | 平台 | 状态 | 做法 |
+    | --- | --- | --- |
+    | macOS | ✅ | Rust 客户端 `with_client_auth_cert` + 指纹固定 |
+    | 鸿蒙 | ✅ | RemoteCommunicationKit：`remoteValidation: 'skip'` 跳过服务端校验，`certificate` 出示本机证书；`DeviceIdentity` 首次启动用 CryptoArchitectureKit 生成，私钥留在沙箱 |
+    | Android | ⚠️ 待补 | `SSLSocketFactory` 只做了 TrustAll，没有客户端证书，连官方 HTTPS 对端会被拒 |
 - **配对码（PIN）**：`prepare-upload` 请求体可带 `"pin": "1234"`；接收端未开启 PIN 时
   省略该字段。接收端要求 PIN 但未提供/不匹配时返回 **401**，发送端据此提示用户输入。
 
